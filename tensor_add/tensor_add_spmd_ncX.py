@@ -94,5 +94,5 @@ if __name__ == "__main__":
     # works
     test_torch_spmd(num_p_tiles = 8, num_f_tiles = 8, num_cores = 2)
 
-    works
+    # works
     test_torch_spmd(num_p_tiles = 8, num_f_tiles = 8, num_cores = 4)
