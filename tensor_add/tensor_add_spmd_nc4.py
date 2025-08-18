@@ -2,9 +2,7 @@ import torch_neuronx
 from neuronxcc import nki
 import neuronxcc.nki.language as nl
 import torch
-from torch_xla.core import xla_model as xm
-
-### single 
+from torch_xla.core import xla_model as xm 
 
 @nki.jit
 def nki_tensor_add_kernel_(a_input, b_input):
@@ -89,10 +87,20 @@ def test_torch_spmd(num_p_tiles, num_f_tiles, num_cores):
     else:
         print("NKI and Torch differ")
 
+        breakpoint()
 if __name__ == "__main__":
 
+    # works
+    test_torch_spmd(num_p_tiles = 8, num_f_tiles = 8, num_cores = 1)
+    
     # works
     test_torch_spmd(num_p_tiles = 8, num_f_tiles = 8, num_cores = 2)
 
     # works
+    test_torch_spmd(num_p_tiles = 8, num_f_tiles = 8, num_cores = 3)
+
+    # works up to num_core = 4 b/c of LNC=2
+    # keeping LNC = 2 enables this kernel to integrate more easily with NxDI
     test_torch_spmd(num_p_tiles = 8, num_f_tiles = 8, num_cores = 4)
+
+    
