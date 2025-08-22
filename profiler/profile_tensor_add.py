@@ -53,8 +53,6 @@ if __name__ == "__main__":
         ms_duration=30000) as profiler:
 
         num_runs = 10
-
-        result = 0
         
         for i in range(1, num_runs):
             
