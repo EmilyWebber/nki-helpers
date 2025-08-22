@@ -49,10 +49,12 @@ if __name__ == "__main__":
         port=9012,
         profile_type='system',
         target='neuron_profile_perfetto',
-        output_dir=os.environ['NEURON_RT_INSPECT_OUTPUT_DIR'],
+        output_dir='output',
         ms_duration=30000) as profiler:
 
         num_runs = 10
+
+        result = 0
         
         for i in range(1, num_runs):
             
