@@ -26,8 +26,6 @@ def rms_norm(x, scale, eps=1e-05):
     # Normalize
     t = t * rsqrt
 
-    breakpoint()
-    
     # Apply scale - broadcasting happens automatically
     t = t * scale
     
@@ -155,7 +153,7 @@ def nki_rms_norm(x, scale, eps=1e-05):
     t = t * rsqrt
     
     # Apply scale - broadcasting happens automatically
-    t = t * scale
+    t = nl.multiply(t, scale)
     
     # Convert back to original dtype
     return t.astype(x.dtype)
