@@ -107,27 +107,25 @@ def v1(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, ml
     selected_mlp1_bias = mlp1_bias[expert_indices]
 
     # Equivalent to torch.einsum("beck,bk->bec", mlp1_weight, t)
-    t_expanded = t[:, None, None, :].transpose(0, 1, 3, 2)  # shape: (128, 1, 512, 1)
-    t = np.matmul(mlp1_weight, t_expanded)  # shape: (128, 4, 256, 1)
-    t = t.squeeze(-1)  # shape: (128, 4, 256)
+    
+    t_expanded = t[:, None, None, :].transpose(0, 1, 3, 2)  # (128, 1, 512, 1)
+    
+    t = np.matmul(selected_mlp1_weights, t_expanded)  #  (128, 4, 256, 1)
+    t = t.squeeze(-1)  # s (128, 4, 256)
     
     t = swiglu(t)    
 
     # MLP 2
-    selected_mlp_weight_2 = mlp2_weight[expert_indices]
-    selected_mlp_bias_2 = mlp2_bias[expert_indices]
+    selected_mlp_weight_2 = mlp2_weight[expert_indices] # (128, 4, 512, 128)
+    selected_mlp_bias_2 = mlp2_bias[expert_indices] # (128, 4, 512)
 
-    t_expanded = t.transpose(0, 1, 3, 2)[..., None]  # shape: (128, 4, 1, 128, 1)
-    
-    # Matrix multiply
-    t = np.matmul(mlp2_weight, t_expanded)  # shape: (128, 4, 512, 1)
-    t = t.squeeze(-1)  # shape: (128, 4, 512)
-    
-    # Add bias
-    t = t + mlp2_bias
-    
-    # Sum across expert dimension (equivalent to the 'e' dimension reduction in einsum)
-    t = np.sum(t, axis=1)  # shape: (128, 512)
+    t_expanded = t[..., None]  # (128, 4, 128, 1)
+    t = np.matmul(selected_mlp_weight_2, t_expanded)  #  (128, 4, 512, 1)
+    t = t.squeeze(-1)  # (128, 4, 512)
+    t = t + selected_mlp_bias_2
+    t = np.sum(t, axis=1)  # (128, 512)
+
+    breakpoint()
     
     # t = torch.einsum("bec,be->bc", t, expert_weights)
     
