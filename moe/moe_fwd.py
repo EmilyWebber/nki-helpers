@@ -1,7 +1,7 @@
 '''
 This is a 12-step tutorial that shows how to iteratively develop and improve a NKI kernels for mixture of experts. We focus on the MLP contraction for forward pass, and specifically the context encoding part. We use a TP-degree of 4, assuming a single Trn2 chip which has a default of 4 logical neuron cores. We'll also assume an input context length of 128K, an output sequence length of 4096, and experts per token of 4.
 
-For simplicity, we'll start with a much smaller context lenghth of only 128 tokens. Then we'll work up to the larger context length throughout the tutorial. We'll also start without the router, adding this later in the tutorial.
+For simplicity, we'll start with a much smaller context length of only 128 tokens and a hidden size of 512. Then we'll work up to the larger shapes throughout the tutorial. We'll also start without the router, adding this later in the tutorial.
 '''
 
 import numpy as np
@@ -50,17 +50,17 @@ def softmax(expert_values):
 def v1(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, mlp2_bias):
     '''
     Input tensors:
-        t = (128, 2880)
-        scale = (1, 2880)
-        gate_weight = (2880, 8)
+        t = (128, 512)
+        scale = (1, 512)
+        gate_weight = (512, 8)
         gate_bias = (1, 8)
-        mlp1_weight = (8, 1440, 2880)
-        mlp1_bias = (8, 1440)
-        mlp2_weight = (8, 2880, 720)
-        mlp2_bias = (8, 2880)
+        mlp1_weight = (8, 256, 512)
+        mlp1_bias = (8, 256)
+        mlp2_weight = (8, 512, 128)
+        mlp2_bias = (8, 512)
 
     Output tensor:
-        t_out = (128, 2880)
+        t_out = (128, 512)
         
     '''
 
@@ -125,8 +125,8 @@ def main(version):
     if 'numpy' in version:
 
         # call generate shapes for this version 
-        t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, mlp2_bias = generate_input_shapes(context_length = 128)
-        
+        t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, mlp2_bias = generate_input_shapes(context_length = 128, hidden_size=512)
+
         t_out = v1(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, mlp2_bias)
 
         assert t.shape == t_out.shape
