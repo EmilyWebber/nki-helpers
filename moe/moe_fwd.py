@@ -9,10 +9,31 @@ import numpy as np
 ###############################
 # v1 - write MOE fwd in Numpy #
 ###############################
-def v1(t, mlp1_weight, mlp1_bias, mlp2_weight, mlp2_bias):
+def rms_norm(x, scale, eps=1e-05):  
+    
+    # Convert to float32 for better numerical stability
+    t = x.astype(np.float32)
+    
+    # Compute mean of squares along last dimension
+    mean_squared = np.mean(t**2, axis=-1, keepdims=True)
+    
+    # Compute rsqrt(mean + eps) directly
+    rsqrt = 1.0 / np.sqrt(mean_squared + eps)
+    
+    # Normalize
+    t = t * rsqrt
+    
+    # Apply scale - broadcasting happens automatically
+    t = t * scale
+    
+    # Convert back to original dtype
+    return t.astype(x.dtype)
+
+def v1(t, scale, mlp1_weight, mlp1_bias, mlp2_weight, mlp2_bias):
     '''
     Input tensors:
         t = (128, 2880)
+        scale = (1, 2880)
         mlp1_weight = (8, 1440, 2880)
         mlp1_bias = (8, 1440)
         mlp2_weight = (8, 2880, 720)
@@ -23,8 +44,7 @@ def v1(t, mlp1_weight, mlp1_bias, mlp2_weight, mlp2_bias):
         
     '''
 
-    # just the rmsnorm
-    # t = norm(t)
+    t = rms_norm(t, scale)
 
     # a linear transformation
     # g = gate(t)
@@ -57,6 +77,8 @@ def generate_input_shapes(tp=4, context_length = 128000, hidden_size = 2880, num
     
     t = np.random.randn(context_length, hidden_size).astype(np.float16)
     
+    scale = np.ones(hidden_size).astype(np.float16)
+    
     mlp1_weight = np.random.randn(experts_per_device, intermediate_size_per_device, hidden_size).astype(np.float16)
     
     mlp1_bias = np.random.randn(experts_per_device, intermediate_size_per_device).astype(np.float16)
@@ -65,20 +87,19 @@ def generate_input_shapes(tp=4, context_length = 128000, hidden_size = 2880, num
 
     mlp2_bias = np.random.randn(experts_per_device, hidden_size).astype(np.float16)
 
-    return t, mlp1_weight, mlp1_bias, mlp2_weight, mlp2_bias
-
-
+    return t, scale, mlp1_weight, mlp1_bias, mlp2_weight, mlp2_bias
 
 def main(version):
     
     if 'numpy' in version:
 
         # call generate shapes for this version 
-        t, mlp1_weight, mlp1_bias, mlp2_weight, mlp2_bias = generate_input_shapes(context_length = 128)
+        t, scale, mlp1_weight, mlp1_bias, mlp2_weight, mlp2_bias = generate_input_shapes(context_length = 128)
         
-        t_out = v1(t, mlp1_weight, mlp1_bias, mlp2_weight, mlp2_bias)
+        t_out = v1(t, scale, mlp1_weight, mlp1_bias, mlp2_weight, mlp2_bias)
 
         assert t.shape == t_out.shape
 
 if __name__ == "__main__":
+    
     main(version = 'numpy')
