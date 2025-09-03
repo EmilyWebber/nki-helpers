@@ -78,6 +78,8 @@ def swiglu(x, alpha=1.702, limit=7.0):
             
 def v1(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, mlp2_bias):
     '''
+    Does all operations for the MLPBlock forward pass in pure Numpy, assuming tiny shapes.
+    
     Input tensors:
         t = (128, 512)
         scale = (1, 512)
@@ -103,13 +105,11 @@ def v1(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, ml
     expert_weights = softmax(expert_values)
 
     # MLP 1
-    selected_mlp1_weights = mlp1_weight[expert_indices]
+    selected_mlp1_weights = mlp1_weight[expert_indices] # (128, 4, 256, 512)
     selected_mlp1_bias = mlp1_bias[expert_indices]
 
     # Equivalent to torch.einsum("beck,bk->bec", mlp1_weight, t)
-    
     t_expanded = t[:, None, None, :].transpose(0, 1, 3, 2)  # (128, 1, 512, 1)
-    
     t = np.matmul(selected_mlp1_weights, t_expanded)  #  (128, 4, 256, 1)
     t = t.squeeze(-1)  # s (128, 4, 256)
     
@@ -119,6 +119,7 @@ def v1(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, ml
     selected_mlp_weight_2 = mlp2_weight[expert_indices] # (128, 4, 512, 128)
     selected_mlp_bias_2 = mlp2_bias[expert_indices] # (128, 4, 512)
 
+    # Equivalent to torch.einsum("beck,bek->bec", mlp2_weight, t)
     t_expanded = t[..., None]  # (128, 4, 128, 1)
     t = np.matmul(selected_mlp_weight_2, t_expanded)  #  (128, 4, 512, 1)
     t = t.squeeze(-1)  # (128, 4, 512)
@@ -130,6 +131,9 @@ def v1(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, ml
     return t
 
 def generate_input_shapes(tp=4, context_length = 128000, hidden_size = 2880, num_experts = 32):
+    '''
+    Generates all shapes used throughout the tutorial, but takes different parameters based on which version you want to test.
+    '''
 
     intermediate_size_per_device = (hidden_size * 2) // tp
 
