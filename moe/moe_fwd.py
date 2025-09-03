@@ -5,6 +5,9 @@ For simplicity, we'll start with a much smaller context length of only 128 token
 '''
 
 import numpy as np
+from neuronxcc import nki
+import neuronxcc.nki.isa as nisa
+import neuronxcc.nki.language as nl
 
 ###############################
 # v1 - write MOE fwd in Numpy #
@@ -22,6 +25,8 @@ def rms_norm(x, scale, eps=1e-05):
     
     # Normalize
     t = t * rsqrt
+
+    breakpoint()
     
     # Apply scale - broadcasting happens automatically
     t = t * scale
@@ -124,11 +129,77 @@ def v1(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, ml
     t = np.matmul(selected_mlp_weight_2, t_expanded)  #  (128, 4, 512, 1)
     t = t.squeeze(-1)  # (128, 4, 512)
     t = t + selected_mlp_bias_2
-    
+
+    # Equivalent to torch.einsum("bec,be->bc", t, expert_weights)
     t = t * expert_weights[..., None]
     t = np.sum(t, axis=1)  # (128, 512)
         
     return t
+
+
+##################################
+# v2 - write MOE fwd in NKI Lang #
+##################################
+
+def nki_rms_norm(x, scale, eps=1e-05):
+    # Convert to float32 for better numerical stability
+    t = x.astype(np.float32)
+    
+    # Compute mean of squares along last dimension
+    mean_squared = nl.mean(nl.square(t), axis=-1, keepdims=True)
+    
+    # Compute rsqrt(mean + eps) directly
+    rsqrt = 1.0 / nl.sqrt(mean_squared + eps)
+    
+    # Normalize
+    t = t * rsqrt
+    
+    # Apply scale - broadcasting happens automatically
+    t = t * scale
+    
+    # Convert back to original dtype
+    return t.astype(x.dtype)
+
+
+@nki.jit
+def v2(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, mlp2_bias):
+    '''
+    Does all operations for the MLPBlock forward pass in pure Numpy, assuming tiny shapes.
+    
+    Input tensors:
+        t = (128, 512)
+        scale = (1, 512)
+        gate_weight = (512, 8)
+        gate_bias = (1, 8)
+        mlp1_weight = (8, 256, 512)
+        mlp1_bias = (8, 256)
+        mlp2_weight = (8, 512, 128)
+        mlp2_bias = (8, 512)
+
+    Output tensor:
+        t_out = (128, 512)
+        
+    '''
+
+    # experts per token
+    k = 4
+
+    result = nl.ndarray((t.shape), dtype = t.dtype, buffer = nl.shared_hbm)
+
+    t = nl.load(t)
+    scale = nl.load(scale)
+
+    t = nki_rms_norm(t, scale)
+
+    nl.store(result[...], value = t)
+    
+    return result
+
+
+
+
+
+    
 
 def generate_input_shapes(tp=4, context_length = 128000, hidden_size = 2880, num_experts = 32):
     '''
@@ -141,7 +212,7 @@ def generate_input_shapes(tp=4, context_length = 128000, hidden_size = 2880, num
     
     t = np.random.randn(context_length, hidden_size).astype(np.float16)
     
-    scale = np.ones(hidden_size).astype(np.float16)
+    scale = np.ones((1, hidden_size)).astype(np.float16)
 
     gate_weight = np.random.randn(hidden_size, experts_per_device).astype(np.float16)
 
@@ -162,12 +233,18 @@ def main(version):
     if 'numpy' in version:
 
         # call generate shapes for this version 
-        t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, mlp2_bias = generate_input_shapes(context_length = 128, hidden_size=512)
-
+        t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, mlp2_bias = generate_input_shapes(context_length = 128, 
+                                                                                                                 hidden_size=512)
         t_out = v1(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, mlp2_bias)
 
-        assert t.shape == t_out.shape
+    if 'lang' in version:
+
+        t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, mlp2_bias = generate_input_shapes(context_length = 128, 
+                                                                                                                 hidden_size=512)
+        t_out = v2(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, mlp2_bias)
+
+    assert t.shape == t_out.shape
 
 if __name__ == "__main__":
     
-    main(version = 'numpy')
+    main(version = 'lang')
