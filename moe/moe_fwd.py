@@ -82,19 +82,19 @@ def swiglu(x, alpha=1.702, limit=7.0):
 def v1(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, mlp2_bias):
     '''
     Does all operations for the MLPBlock forward pass in pure Numpy, assuming tiny shapes.
-    
+
     Input tensors:
-        t = (128, 512)
-        scale = (1, 512)
-        gate_weight = (512, 8)
+        t = (128, 128)
+        scale = (1, 128)
+        gate_weight = (128, 8) 
         gate_bias = (1, 8)
-        mlp1_weight = (8, 256, 512)
-        mlp1_bias = (8, 256)
-        mlp2_weight = (8, 512, 128)
-        mlp2_bias = (8, 512)
+        mlp1_weight = (8, 64, 128)
+        mlp1_bias = (8, 64)
+        mlp2_weight = (8, 128, 32)
+        mlp2_bias = (8, 128)
 
     Output tensor:
-        t_out = (128, 512)
+        t_out = (128, 128)
         
     '''
 
@@ -162,20 +162,20 @@ def nki_rms_norm(x, scale, eps=1e-05):
 @nki.jit
 def v2(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, mlp2_bias):
     '''
-    Does all operations for the MLPBlock forward pass in pure Numpy, assuming tiny shapes.
+    Does all operations for the MLPBlock forward pass in NKI Lang, assuming tiny shapes.
     
     Input tensors:
-        t = (128, 512)
-        scale = (1, 512)
-        gate_weight = (512, 8)
+        t = (128, 128)
+        scale = (1, 128)
+        gate_weight = (128, 8) 
         gate_bias = (1, 8)
-        mlp1_weight = (8, 256, 512)
-        mlp1_bias = (8, 256)
-        mlp2_weight = (8, 512, 128)
-        mlp2_bias = (8, 512)
+        mlp1_weight = (8, 64, 128)
+        mlp1_bias = (8, 64)
+        mlp2_weight = (8, 128, 32)
+        mlp2_bias = (8, 128)
 
     Output tensor:
-        t_out = (128, 512)
+        t_out = (128, 128)
         
     '''
 
@@ -184,11 +184,21 @@ def v2(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, ml
 
     result = nl.ndarray((t.shape), dtype = t.dtype, buffer = nl.shared_hbm)
 
+    # Load all the tiles
+
     t = nl.load(t)
     scale = nl.load(scale)
+    gate_bias = nl.load(gate_bias)
+    gate_weight = nl.load(gate_weight)
 
+    # RMSNorm
     t = nki_rms_norm(t, scale)
+    
+    # Gate projection
+    g = nl.matmul(t, gate_weight)
 
+    g = nl.add(g, gate_bias)
+    
     nl.store(result[...], value = t)
     
     return result
@@ -232,13 +242,14 @@ def main(version):
 
         # call generate shapes for this version 
         t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, mlp2_bias = generate_input_shapes(context_length = 128, 
-                                                                                                                 hidden_size=512)
+                                                                                                                 hidden_size=128)
         t_out = v1(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, mlp2_bias)
 
     if 'lang' in version:
 
         t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, mlp2_bias = generate_input_shapes(context_length = 128, 
-                                                                                                                 hidden_size=512)
+                                                                                                                 hidden_size=128)
+        
         t_out = v2(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, mlp2_bias)
 
     assert t.shape == t_out.shape
