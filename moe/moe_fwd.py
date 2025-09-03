@@ -29,11 +29,13 @@ def rms_norm(x, scale, eps=1e-05):
     # Convert back to original dtype
     return t.astype(x.dtype)
 
-def v1(t, scale, mlp1_weight, mlp1_bias, mlp2_weight, mlp2_bias):
+def v1(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, mlp2_bias):
     '''
     Input tensors:
         t = (128, 2880)
         scale = (1, 2880)
+        gate_weight = (2880, 8)
+        gate_bias = (1, 8)
         mlp1_weight = (8, 1440, 2880)
         mlp1_bias = (8, 1440)
         mlp2_weight = (8, 2880, 720)
@@ -46,8 +48,8 @@ def v1(t, scale, mlp1_weight, mlp1_bias, mlp2_weight, mlp2_bias):
 
     t = rms_norm(t, scale)
 
-    # a linear transformation
-    # g = gate(t)
+    # a linear transformation for the gate projection
+    g = np.matmul(t, gate_weight) + gate_bias
 
     # for numpy, use np.argsort probably
     # experts = topk(g)
@@ -78,7 +80,11 @@ def generate_input_shapes(tp=4, context_length = 128000, hidden_size = 2880, num
     t = np.random.randn(context_length, hidden_size).astype(np.float16)
     
     scale = np.ones(hidden_size).astype(np.float16)
-    
+
+    gate_weight = np.random.randn(hidden_size, experts_per_device).astype(np.float16)
+
+    gate_bias = np.random.randn(experts_per_device).astype(np.float16)
+
     mlp1_weight = np.random.randn(experts_per_device, intermediate_size_per_device, hidden_size).astype(np.float16)
     
     mlp1_bias = np.random.randn(experts_per_device, intermediate_size_per_device).astype(np.float16)
@@ -87,16 +93,16 @@ def generate_input_shapes(tp=4, context_length = 128000, hidden_size = 2880, num
 
     mlp2_bias = np.random.randn(experts_per_device, hidden_size).astype(np.float16)
 
-    return t, scale, mlp1_weight, mlp1_bias, mlp2_weight, mlp2_bias
+    return t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, mlp2_bias
 
 def main(version):
     
     if 'numpy' in version:
 
         # call generate shapes for this version 
-        t, scale, mlp1_weight, mlp1_bias, mlp2_weight, mlp2_bias = generate_input_shapes(context_length = 128)
+        t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, mlp2_bias = generate_input_shapes(context_length = 128)
         
-        t_out = v1(t, scale, mlp1_weight, mlp1_bias, mlp2_weight, mlp2_bias)
+        t_out = v1(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, mlp2_bias)
 
         assert t.shape == t_out.shape
 
