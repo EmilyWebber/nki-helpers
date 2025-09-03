@@ -113,9 +113,21 @@ def v1(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, ml
     
     t = swiglu(t)    
 
-    # mlp_weight_2 = mlp2_weight[indices]
-    # mlp_bias_2 = mlp2_bias[indices]
-    # t = torch.einsum("beck,bek->bec", mlp2_weight, t) + mlp_bias_2
+    # MLP 2
+    selected_mlp_weight_2 = mlp2_weight[expert_indices]
+    selected_mlp_bias_2 = mlp2_bias[expert_indices]
+
+    t_expanded = t.transpose(0, 1, 3, 2)[..., None]  # shape: (128, 4, 1, 128, 1)
+    
+    # Matrix multiply
+    t = np.matmul(mlp2_weight, t_expanded)  # shape: (128, 4, 512, 1)
+    t = t.squeeze(-1)  # shape: (128, 4, 512)
+    
+    # Add bias
+    t = t + mlp2_bias
+    
+    # Sum across expert dimension (equivalent to the 'e' dimension reduction in einsum)
+    t = np.sum(t, axis=1)  # shape: (128, 512)
     
     # t = torch.einsum("bec,be->bc", t, expert_weights)
     
