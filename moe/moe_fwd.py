@@ -123,12 +123,10 @@ def v1(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, ml
     t = np.matmul(selected_mlp_weight_2, t_expanded)  #  (128, 4, 512, 1)
     t = t.squeeze(-1)  # (128, 4, 512)
     t = t + selected_mlp_bias_2
+    
+    t = t * expert_weights[..., None]
     t = np.sum(t, axis=1)  # (128, 512)
-
-    breakpoint()
-    
-    # t = torch.einsum("bec,be->bc", t, expert_weights)
-    
+        
     return t
 
 def generate_input_shapes(tp=4, context_length = 128000, hidden_size = 2880, num_experts = 32):
@@ -164,7 +162,7 @@ def main(version):
 
         t_out = v1(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, mlp2_bias)
 
-        # assert t.shape == t_out.shape
+        assert t.shape == t_out.shape
 
 if __name__ == "__main__":
     
