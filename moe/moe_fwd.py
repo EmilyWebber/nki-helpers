@@ -46,6 +46,35 @@ def softmax(expert_values):
     expert_weights = exp_values / sum_exp
 
     return expert_weights
+
+def sigmoid(x):
+    # Numerically stable sigmoid
+    x_safe = x.copy()
+    mask = x_safe > 0
+    
+    result = np.zeros_like(x_safe)
+    # Where x > 0
+    result[mask] = 1 / (1 + np.exp(-x_safe[mask]))
+    # Where x <= 0
+    exp_x = np.exp(x_safe[~mask])
+    result[~mask] = exp_x / (1 + exp_x)
+    
+    return result
+
+def swiglu(x, alpha=1.702, limit=7.0):
+    # Split into two halves along last dimension
+    x_glu, x_linear = x[..., ::2], x[..., 1::2]
+    
+    # Clamp the input values
+    x_glu = np.clip(x_glu, None, limit)
+    x_linear = np.clip(x_linear, -limit, limit)
+    
+    # Compute SwiGLU with numerically stable sigmoid
+    out_glu = x_glu * sigmoid(alpha * x_glu)
+    
+    # Add 1 to linear part and multiply
+    return out_glu * (x_linear + 1)
+
             
 def v1(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, mlp2_bias):
     '''
@@ -79,12 +108,10 @@ def v1(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, ml
 
     # Equivalent to torch.einsum("beck,bk->bec", mlp1_weight, t)
     t_expanded = t[:, None, None, :].transpose(0, 1, 3, 2)  # shape: (128, 1, 512, 1)
+    t = np.matmul(mlp1_weight, t_expanded)  # shape: (128, 4, 256, 1)
+    t = t.squeeze(-1)  # shape: (128, 4, 256)
     
-    t_out = np.matmul(mlp1_weight, t_expanded)  # shape: (128, 4, 256, 1)
-    
-    t_out = t_out.squeeze(-1)  # shape: (128, 4, 256)
-    
-    # t = swiglu(t)    
+    t = swiglu(t)    
 
     # mlp_weight_2 = mlp2_weight[indices]
     # mlp_bias_2 = mlp2_bias[indices]
