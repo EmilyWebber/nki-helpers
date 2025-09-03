@@ -29,6 +29,24 @@ def rms_norm(x, scale, eps=1e-05):
     # Convert back to original dtype
     return t.astype(x.dtype)
 
+def softmax(expert_values):
+        
+    # Subtract max for numerical stability (along expert dimension)
+    max_values = np.max(expert_values, axis=-1, keepdims=True)
+    
+    shifted_values = expert_values - max_values
+    
+    # Compute exp of shifted values
+    exp_values = np.exp(shifted_values)
+    
+    # Sum across expert dimension (axis=-1) and keep dims for broadcasting
+    sum_exp = np.sum(exp_values, axis=-1, keepdims=True)
+    
+    # Normalize
+    expert_weights = exp_values / sum_exp
+
+    return expert_weights
+            
 def v1(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, mlp2_bias):
     '''
     Input tensors:
@@ -46,17 +64,22 @@ def v1(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, ml
         
     '''
 
+    # num experts per device
+    k = gate_bias.shape[1]
+    
     t = rms_norm(t, scale)
 
     # a linear transformation for the gate projection
     g = np.matmul(t, gate_weight) + gate_bias
 
-    # for numpy, use np.argsort probably
-    # experts = topk(g)
+    # find the experts using the gate logits from above, doing full sort like source code
+    expert_indices = np.argsort(-g, axis=-1)[:, :k]
     
-    # expert_weights = softmax(experts)
+    # Get the corresponding values
+    expert_values = np.take_along_axis(g, expert_indices, axis=-1)
 
-    # indices = experts.indices
+    # softmax on the expert values
+    expert_weights = softmax(expert_values)
 
     # mlp_weight_1 = mlp1_weight[indices]
     # mlp_bias_1 = mlp1_bias[indices]
@@ -83,7 +106,7 @@ def generate_input_shapes(tp=4, context_length = 128000, hidden_size = 2880, num
 
     gate_weight = np.random.randn(hidden_size, experts_per_device).astype(np.float16)
 
-    gate_bias = np.random.randn(experts_per_device).astype(np.float16)
+    gate_bias = np.random.randn(1, experts_per_device).astype(np.float16)
 
     mlp1_weight = np.random.randn(experts_per_device, intermediate_size_per_device, hidden_size).astype(np.float16)
     
