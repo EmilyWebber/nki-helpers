@@ -1,5 +1,5 @@
 '''
-This is a 12-step tutorial that shows how to iteratively develop and improve a NKI kernels for mixture of experts. We focus on the MLP contraction for forward pass, and specifically the context encoding part. We use a TP-degree of 4, assuming a single Trn2 chip which has a default of 4 logical neuron cores. We'll also assume an input context length of 128K, and an output sequence length of 4096.
+This is a 12-step tutorial that shows how to iteratively develop and improve a NKI kernels for mixture of experts. We focus on the MLP contraction for forward pass, and specifically the context encoding part. We use a TP-degree of 4, assuming a single Trn2 chip which has a default of 4 logical neuron cores. We'll also assume an input context length of 128K, an output sequence length of 4096, and experts per token of 4.
 
 For simplicity, we'll start with a much smaller context lenghth of only 128 tokens. Then we'll work up to the larger context length throughout the tutorial. We'll also start without the router, adding this later in the tutorial.
 '''
@@ -64,8 +64,8 @@ def v1(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, ml
         
     '''
 
-    # num experts per device
-    k = gate_bias.shape[1]
+    # experts per token
+    k = 4
     
     t = rms_norm(t, scale)
 
@@ -81,8 +81,10 @@ def v1(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, ml
     # softmax on the expert values
     expert_weights = softmax(expert_values)
 
-    # mlp_weight_1 = mlp1_weight[indices]
-    # mlp_bias_1 = mlp1_bias[indices]
+    selected_mlp1_weights = mlp1_weight[expert_indices]
+
+    selected_mlp1_bias = mlp1_bias[expert_indices]
+
     # t = torch.einsum("beck,bk->bec", mlp1_weight, t) + mlp1_bias
     # t = swiglu(t)    
 
