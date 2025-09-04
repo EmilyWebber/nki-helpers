@@ -103,34 +103,35 @@ def v1(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, ml
     
     t = rms_norm(t, scale)
     g = np.matmul(t, gate_weight) + gate_bias
+
     expert_indices = np.argsort(-g, axis=-1)[:, :k]
     expert_values = np.take_along_axis(g, expert_indices, axis=-1)
     expert_weights = softmax(expert_values)
 
     # MLP 1
-    selected_mlp1_weights = mlp1_weight[expert_indices] # (128, 4, 256, 512)
-    selected_mlp1_bias = mlp1_bias[expert_indices]
-
+    selected_mlp1_weights = mlp1_weight[expert_indices] # (128, 4, 64, 128)
+    selected_mlp1_bias = mlp1_bias[expert_indices] # (128, 4, 64)
+    
     # Equivalent to torch.einsum("beck,bk->bec", mlp1_weight, t)
-    t_expanded = t[:, None, None, :].transpose(0, 1, 3, 2)  # (128, 1, 512, 1)
-    t = np.matmul(selected_mlp1_weights, t_expanded)  #  (128, 4, 256, 1)
-    t = t.squeeze(-1)  # s (128, 4, 256)
+    t_expanded = t[:, None, None, :].transpose(0, 1, 3, 2)  # (128, 1, 128, 1)
+    t = np.matmul(selected_mlp1_weights, t_expanded)  #  (128, 4, 64, 1)
+    t = t.squeeze(-1)  # s (128, 4, 64)
     
     t = swiglu(t)    
 
     # MLP 2
-    selected_mlp_weight_2 = mlp2_weight[expert_indices] # (128, 4, 512, 128)
-    selected_mlp_bias_2 = mlp2_bias[expert_indices] # (128, 4, 512)
+    selected_mlp_weight_2 = mlp2_weight[expert_indices] # (128, 4, 128, 32)
+    selected_mlp_bias_2 = mlp2_bias[expert_indices] # (128, 4, 128)
 
     # Equivalent to torch.einsum("beck,bek->bec", mlp2_weight, t)
-    t_expanded = t[..., None]  # (128, 4, 128, 1)
-    t = np.matmul(selected_mlp_weight_2, t_expanded)  #  (128, 4, 512, 1)
-    t = t.squeeze(-1)  # (128, 4, 512)
+    t_expanded = t[..., None]  # (128, 4, 32, 1)
+    t = np.matmul(selected_mlp_weight_2, t_expanded)  #  (128, 4, 128, 1)
+    t = t.squeeze(-1)  # (128, 4, 32)
     t = t + selected_mlp_bias_2
 
     # Equivalent to torch.einsum("bec,be->bc", t, expert_weights)
-    t = t * expert_weights[..., None]
-    t = np.sum(t, axis=1)  # (128, 512)
+    t = t * expert_weights[..., None] # (128, 4, 128)
+    t = np.sum(t, axis=1)  # (128, 128)
         
     return t
 
@@ -157,6 +158,43 @@ def nki_rms_norm(x, scale, eps=1e-05):
     
     # Convert back to original dtype
     return t.astype(x.dtype)
+
+    
+def nki_lang_topk(g, k=4, TILE_P = 128):
+    # g shape: (128, 8)
+    
+    # Initialize output arrays
+    expert_indices = nl.ndarray((TILE_P, k), dtype=g.dtype, buffer=nl.sbuf)
+    expert_values = nl.ndarray((TILE_P, k), dtype=g.dtype, buffer=nl.sbuf)
+
+    # Create constants with proper types
+    zero = nl.zeros((TILE_P, 1), dtype=g.dtype, buffer=nl.sbuf)
+    one = nl.ones((TILE_P, 1), dtype=g.dtype, buffer=nl.sbuf)
+    neg_inf = nl.full((TILE_P, 1), fill_value=float('-inf'), dtype=g.dtype, buffer=nl.sbuf)
+    
+    # For each of the k experts we want to select
+    # affine range should do all 4 in parallel
+    for i in nl.affine_range(k):
+        
+        # Find the maximum values across all 128 tokens
+        m = nl.max(g, axis=-1) 
+        
+        max_vals = nl.broadcast_to(m, shape = (g.shape)) # (128, 8)
+
+        # Find positions where values equal the max
+        condition = nl.equal(g, max_vals) # (128, 8)
+        
+        # Assign values to all 128 tokens in kth position from expert values in g
+        expert_values[:, i] = m
+
+
+        # doesn't work, need to reduce the (128, 8) tile into a (128, 1) tile, holding onto the index space where True in condition        
+        # expert_indices[:, i] = nl.where(condition, one, zero)
+        
+        # Set selected values to -inf for next iteration
+        g[...] = nl.where(condition, neg_inf, g)
+    
+    return expert_indices, expert_values 
 
 
 @nki.jit
@@ -196,8 +234,12 @@ def v2(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, ml
     
     # Gate projection
     g = nl.matmul(t, gate_weight)
-
     g = nl.add(g, gate_bias)
+
+    # topk
+    expert_indices, expert_values = nki_lang_topk(g, k)
+
+    
     
     nl.store(result[...], value = t)
     
