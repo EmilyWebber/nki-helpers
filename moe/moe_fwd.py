@@ -215,6 +215,24 @@ def nki_lang_topk(g, k=4, TILE_P = 128):
     return expert_indices, expert_values 
 
 
+def nki_lang_softmax(expert_values):
+        
+    # Subtract max for numerical stability (along expert dimension)
+    max_values = nl.max(expert_values, axis=-1, keepdims=True)
+    
+    shifted_values = expert_values - max_values
+    
+    # Compute exp of shifted values
+    exp_values = nl.exp(shifted_values)
+    
+    # Sum across expert dimension (axis=-1) and keep dims for broadcasting
+    sum_exp = nl.sum(exp_values, axis=-1, keepdims=True)
+    
+    # Normalize
+    expert_weights = exp_values / sum_exp
+
+    return expert_weights
+
 @nki.jit
 def v2(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, mlp2_bias):
     '''
@@ -256,7 +274,8 @@ def v2(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, ml
 
     # topk
     expert_indices, expert_values = nki_lang_topk(g, k)
-
+    expert_weights = nki_lang_softmax(expert_values)
+    
     
     
     nl.store(result[...], value = t)
