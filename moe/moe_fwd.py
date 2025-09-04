@@ -253,8 +253,12 @@ def v2(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, ml
         
     '''
 
-    # experts per token
+    # set parameters
     k = 4
+    batch_size = t.shape[0]                    # 128
+    num_experts = mlp1_weight.shape[0]         # 8
+    intermediate_size = mlp1_weight.shape[1]   # 64
+    hidden_size = mlp1_weight.shape[2]         # 128
 
     result = nl.ndarray((t.shape), dtype = t.dtype, buffer = nl.shared_hbm)
 
@@ -273,20 +277,38 @@ def v2(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, ml
     g = nl.add(g, gate_bias)
 
     # topk
-    expert_indices, expert_values = nki_lang_topk(g, k)
+    expert_indices, expert_values = nki_lang_topk(g, k) # (128, 4)
     expert_weights = nki_lang_softmax(expert_values)
     
+    # MLP1
     
+    # For selected_mlp1_weights:
+    # - (batch_size, k) are block dimensions (B)
+    # - intermediate_size is partition dimension (P)
+    # - hidden_size is free dimension (F)
+    selected_mlp1_weights = nl.ndarray((batch_size, k, nl.par_dim(intermediate_size), hidden_size), 
+                                     dtype=mlp1_weight.dtype, buffer=nl.sbuf)
+    
+    # For selected_mlp1_bias:
+    # - batch_size is block dimension (B)
+    # - k is partition dimension (P)
+    # - intermediate_size is free dimension (F)
+    selected_mlp1_bias = nl.ndarray((batch_size, nl.par_dim(k), intermediate_size), 
+                                   dtype=mlp1_bias.dtype, buffer=nl.sbuf)
+    
+    # Load weights and biases using block dimensions
+    for b in nl.static_range(batch_size):
+        for ki in nl.static_range(k):
+            # works
+            selected_mlp1_weights[b, ki, :, :] = nl.load(mlp1_weight[expert_indices[b, ki]])
+
+            # doesn't work
+            # selected_mlp1_bias[b, ki, :] = nl.load(mlp1_bias[expert_indices[b, ki]])
     
     nl.store(result[...], value = t)
     
     return result
 
-
-
-
-
-    
 
 def generate_input_shapes(tp=4, context_length = 128000, hidden_size = 2880, num_experts = 32):
     '''
