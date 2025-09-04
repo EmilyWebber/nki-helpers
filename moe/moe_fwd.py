@@ -162,6 +162,8 @@ def nki_rms_norm(x, scale, eps=1e-05):
     
 def nki_lang_topk(g, k=4, TILE_P = 128):
     # g shape: (128, 8)
+
+    num_experts = 8
     
     # Initialize output arrays
     expert_indices = nl.ndarray((TILE_P, k), dtype=g.dtype, buffer=nl.sbuf)
@@ -171,27 +173,43 @@ def nki_lang_topk(g, k=4, TILE_P = 128):
     zero = nl.zeros((TILE_P, 1), dtype=g.dtype, buffer=nl.sbuf)
     one = nl.ones((TILE_P, 1), dtype=g.dtype, buffer=nl.sbuf)
     neg_inf = nl.full((TILE_P, 1), fill_value=float('-inf'), dtype=g.dtype, buffer=nl.sbuf)
+
+    zero_e = nl.zeros((TILE_P, num_experts), dtype=g.dtype, buffer=nl.sbuf)
+    one_e = nl.ones((TILE_P, num_experts), dtype=g.dtype, buffer=nl.sbuf)
+    
+    # Create range of expert indices [0,1,2,3,4,5,6,7]
+    expert_range = nl.ndarray((1, num_experts), dtype=g.dtype, buffer=nl.sbuf)
+    
+    # do not unroll this loop, keep it in order
+    for i in nl.static_range(num_experts):
+        expert_range[0, i] = i
     
     # For each of the k experts we want to select
-    # affine range should do all 4 in parallel
-    for i in nl.affine_range(k):
+    for i in nl.static_range(k):
         
         # Find the maximum values across all 128 tokens
         m = nl.max(g, axis=-1) 
-        
+
+        # Assign values to all 128 tokens in kth position from expert values in g
+        expert_values[:, i] = m
+
         max_vals = nl.broadcast_to(m, shape = (g.shape)) # (128, 8)
 
         # Find positions where values equal the max
         condition = nl.equal(g, max_vals) # (128, 8)
-        
-        # Assign values to all 128 tokens in kth position from expert values in g
-        expert_values[:, i] = m
 
+        # Convert boolean condition to integers (0s and 1s)
+        condition_int = nl.where(condition, one_e, zero_e) # (128, 8)
 
-        # doesn't work, need to reduce the (128, 8) tile into a (128, 1) tile, holding onto the index space where True in condition        
-        # expert_indices[:, i] = nl.where(condition, one, zero)
+        # captures the value of the index as an integer
+        indices = nl.multiply(condition_int, expert_range) # (128, 8)
+
+        # reduce along f-dim 
+        index = nl.sum(indices, axis=-1) # (128, 1)
+
+        expert_indices[:, i] = index
         
-        # Set selected values to -inf for next iteration
+        # Set selected values in g to -inf for next iteration
         g[...] = nl.where(condition, neg_inf, g)
     
     return expert_indices, expert_values 
