@@ -233,6 +233,55 @@ def nki_lang_softmax(expert_values):
 
     return expert_weights
 
+def load_mlp_weights_biases(batch_size, k, intermediate_size, hidden_size,mlp1_weight, mlp1_bias, expert_indices ):
+    
+    # For selected_mlp1_weights:
+    # - (batch_size, k) are block dimensions (B)
+    # - intermediate_size is partition dimension (P)
+    # - hidden_size is free dimension (F)
+    selected_mlp1_weights = nl.ndarray((batch_size, k, nl.par_dim(intermediate_size), hidden_size), 
+                                     dtype=mlp1_weight.dtype, buffer=nl.sbuf)
+
+    # Load weights using block dimensions
+    for b in nl.static_range(batch_size):
+        for e in nl.static_range(k):
+            # works, but maybe because both b and e are batch dimensions for both weight arrays, might still be off
+            selected_mlp1_weights[b, e, :, :] = nl.load(mlp1_weight[expert_indices[b, e]])
+
+
+    
+    # For selected_mlp1_bias:
+    # - batch_size is block dimension (B)
+    # - k is partition dimension (P)
+    # - intermediate_size is free dimension (F)
+    selected_mlp1_bias = nl.ndarray((batch_size, nl.par_dim(k), intermediate_size), 
+                                   dtype=mlp1_bias.dtype, buffer=nl.sbuf)
+
+    # for b in nl.static_range(batch_size):
+    #     # breaks
+    #     selected_mlp1_bias[b, k, :] = nl.load(mlp1_bias[expert_indices[b, k]])
+    
+    # maybe just load all 8 first, then select just the experts we need 
+    # mlp1_bias_tile = nl.load(mlp1_bias)
+
+    # Now we can index directly from the loaded tile
+    # for b in nl.static_range(batch_size):
+        
+    #     expert_bias_array = nl.ndarray((1, k), dtype=mlp1_bias.dtype, buffer=nl.sbuf)
+        
+    #     # assign the expert indices values for this token to a new array
+    #     expert_bias_array[...] = expert_indices[b, 0:k]
+
+    #     for e in expert_bias_array:
+
+    #         print (e)
+
+            # print (int(e))
+            # selected_mlp1_bias[b, e, :] = expert_bias_array
+
+    return selected_mlp1_weights
+    
+
 @nki.jit
 def v2(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, mlp2_bias):
     '''
@@ -262,7 +311,7 @@ def v2(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, ml
 
     result = nl.ndarray((t.shape), dtype = t.dtype, buffer = nl.shared_hbm)
 
-    # Load all the tiles
+    # Load tiles
 
     t = nl.load(t)
     scale = nl.load(scale)
@@ -281,29 +330,7 @@ def v2(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, ml
     expert_weights = nki_lang_softmax(expert_values)
     
     # MLP1
-    
-    # For selected_mlp1_weights:
-    # - (batch_size, k) are block dimensions (B)
-    # - intermediate_size is partition dimension (P)
-    # - hidden_size is free dimension (F)
-    selected_mlp1_weights = nl.ndarray((batch_size, k, nl.par_dim(intermediate_size), hidden_size), 
-                                     dtype=mlp1_weight.dtype, buffer=nl.sbuf)
-    
-    # For selected_mlp1_bias:
-    # - batch_size is block dimension (B)
-    # - k is partition dimension (P)
-    # - intermediate_size is free dimension (F)
-    selected_mlp1_bias = nl.ndarray((batch_size, nl.par_dim(k), intermediate_size), 
-                                   dtype=mlp1_bias.dtype, buffer=nl.sbuf)
-    
-    # Load weights and biases using block dimensions
-    for b in nl.static_range(batch_size):
-        for ki in nl.static_range(k):
-            # works
-            selected_mlp1_weights[b, ki, :, :] = nl.load(mlp1_weight[expert_indices[b, ki]])
-
-            # doesn't work
-            # selected_mlp1_bias[b, ki, :] = nl.load(mlp1_bias[expert_indices[b, ki]])
+    selected_mlp1_weights = load_mlp_weights_biases(batch_size, k, intermediate_size, hidden_size,mlp1_weight, mlp1_bias, expert_indices )
     
     nl.store(result[...], value = t)
     
