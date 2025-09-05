@@ -1,6 +1,7 @@
-```
+'''
 Inefficient but operational way of indexing into the mlp bias using expert indices
-```
+'''
+
 import numpy as np
 import random
 
