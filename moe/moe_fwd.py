@@ -234,7 +234,7 @@ def nki_lang_softmax(expert_values):
 
     return expert_weights
 
-def load_mlp_weights_biases(batch_size, k, intermediate_size, hidden_size,mlp1_weight, mlp1_bias, expert_indices, num_experts = 8 ):
+def load_mlp_weights(batch_size, k, intermediate_size, hidden_size, mlp1_weight, expert_indices, num_experts = 8 ):
 
     selected_mlp1_weights = nl.ndarray((batch_size, k, nl.par_dim(intermediate_size), hidden_size), 
                                      dtype=mlp1_weight.dtype, buffer=nl.sbuf)
@@ -245,7 +245,28 @@ def load_mlp_weights_biases(batch_size, k, intermediate_size, hidden_size,mlp1_w
     
 
     return selected_mlp1_weights
+
+def load_mlp_bias(batch_size, k, intermediate_size, expert_indices, mlp1_bias, selected_mlp1_bias):
+                  
+    for b in nl.static_range(batch_size):
     
+            for e in nl.static_range(k):
+    
+                # tile view of the expert ID shape (1,1)
+                expert_id = expert_indices[b, e]
+            
+                # create the view of the tensor on hbm using the tile on sbuf for the index
+                one_expert_bias = mlp1_bias[expert_id, :]
+    
+                # slow but working
+                one_expert_tile = nl.load(one_expert_bias)
+            
+                one_expert_tile_T = nl.transpose(one_expert_tile)
+            
+                nl.store(selected_mlp1_bias[b, e:e+1, 0:intermediate_size], value = one_expert_tile_T)
+                
+    return selected_mlp1_bias
+
 
 @nki.jit
 def v2(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, mlp2_bias):
@@ -295,28 +316,14 @@ def v2(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, ml
     expert_weights = nki_lang_softmax(expert_values)
     
     # MLP1
-    selected_mlp1_weights = load_mlp_weights_biases(batch_size, k, intermediate_size, hidden_size,mlp1_weight, mlp1_bias, expert_indices )
+    selected_mlp1_weights = load_mlp_weights(batch_size, k, intermediate_size, hidden_size, mlp1_weight,  expert_indices )
 
     # Create output tensor with k as partition dimension
     selected_mlp1_bias = nl.ndarray((batch_size, nl.par_dim(k), intermediate_size), 
                                    dtype=mlp1_bias.dtype, buffer=nl.hbm)
 
-    for b in nl.static_range(batch_size):
-
-        for e in nl.static_range(k):
-
-            # tile view of the expert ID shape (1,1)
-            expert_id = expert_indices[b, e]
-        
-            # create the view of the tensor on hbm using the tile for the index
-            one_expert_bias = mlp1_bias[expert_id, :]
-
-            # slow but working
-            one_expert_tile = nl.load(one_expert_bias)
-        
-            one_expert_tile_T = nl.transpose(one_expert_tile)
-        
-            nl.store(selected_mlp1_bias[b, e:e+1, 0:intermediate_size], value = one_expert_tile_T)
+    selected_mlp1_bias = load_mlp_bias(batch_size, k, intermediate_size, expert_indices, mlp1_bias, selected_mlp1_bias)
+    
 
     nl.store(result[...], value = t)
     
