@@ -1,3 +1,7 @@
+'''
+Inefficient but operational way to extract the MLP bias given an expert index
+'''
+
 import numpy as np
 import random
 
@@ -55,20 +59,21 @@ def nki_bias_selection(mlp1_bias, expert_indices, batch, k, intermediate_size):
 
     expert_indices = nl.load(expert_indices)
 
-    # just grab the 0th expert for full batch
     for b in nl.static_range(batch):
+
+        for e in nl.static_range(k):
+
+            # tile view of the expert ID shape (1,1)
+            expert_id = expert_indices[b, e]
         
-        expert_id = expert_indices[b, 0]
-    
-        # create the view of the tensor on hbm
-        one_expert_bias = mlp1_bias[expert_id, :]
-    
-        # Try to convert view to tile with nl.copy
-        one_expert_tile = nl.load(one_expert_bias)
-    
-        one_expert_tile_T = nl.transpose(one_expert_tile)
-    
-        nl.store(selected_mlp1_bias[b, 0:1, :], value = one_expert_tile_T)
+            # create the view of the tensor on hbm using the tile for the index
+            one_expert_bias = mlp1_bias[expert_id, :]
+
+            one_expert_tile = nl.load(one_expert_bias)
+        
+            one_expert_tile_T = nl.transpose(one_expert_tile)
+        
+            nl.store(selected_mlp1_bias[b, e:e+1, 0:intermediate_size], value = one_expert_tile_T)
 
     return selected_mlp1_bias
 
@@ -83,6 +88,6 @@ if __name__ == "__main__":
 
     # selected_biases = python_bias_selection(mlp1_bias, expert_indices, batch, k, intermediate_size )
     
-    one_expert_tile_T = nki_bias_selection(mlp1_bias, expert_indices, batch, k, intermediate_size)
+    selected_mlp1_bias = nki_bias_selection(mlp1_bias, expert_indices, batch, k, intermediate_size)
 
     
