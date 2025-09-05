@@ -111,7 +111,7 @@ def v1(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, ml
     # MLP 1
     selected_mlp1_weights = mlp1_weight[expert_indices] # (128, 4, 64, 128)
     selected_mlp1_bias = mlp1_bias[expert_indices] # (128, 4, 64)
-    
+
     # Equivalent to torch.einsum("beck,bk->bec", mlp1_weight, t)
     t_expanded = t[:, None, None, :].transpose(0, 1, 3, 2)  # (128, 1, 128, 1)
     t = np.matmul(selected_mlp1_weights, t_expanded)  #  (128, 4, 64, 1)
@@ -120,7 +120,8 @@ def v1(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, ml
     t = swiglu(t)    
 
     # MLP 2
-    selected_mlp_weight_2 = mlp2_weight[expert_indices] # (128, 4, 128, 32)
+    selected_mlp_weight_2 = mlp2_weight[expert_indices] # (128, 4, 128, 32
+    
     selected_mlp_bias_2 = mlp2_bias[expert_indices] # (128, 4, 128)
 
     # Equivalent to torch.einsum("beck,bek->bec", mlp2_weight, t)
@@ -233,51 +234,15 @@ def nki_lang_softmax(expert_values):
 
     return expert_weights
 
-def load_mlp_weights_biases(batch_size, k, intermediate_size, hidden_size,mlp1_weight, mlp1_bias, expert_indices ):
-    
-    # For selected_mlp1_weights:
-    # - (batch_size, k) are block dimensions (B)
-    # - intermediate_size is partition dimension (P)
-    # - hidden_size is free dimension (F)
+def load_mlp_weights_biases(batch_size, k, intermediate_size, hidden_size,mlp1_weight, mlp1_bias, expert_indices, num_experts = 8 ):
+
     selected_mlp1_weights = nl.ndarray((batch_size, k, nl.par_dim(intermediate_size), hidden_size), 
                                      dtype=mlp1_weight.dtype, buffer=nl.sbuf)
 
-    # Load weights using block dimensions
     for b in nl.static_range(batch_size):
         for e in nl.static_range(k):
-            # works, but maybe because both b and e are batch dimensions for both weight arrays, might still be off
             selected_mlp1_weights[b, e, :, :] = nl.load(mlp1_weight[expert_indices[b, e]])
-
-
     
-    # For selected_mlp1_bias:
-    # - batch_size is block dimension (B)
-    # - k is partition dimension (P)
-    # - intermediate_size is free dimension (F)
-    selected_mlp1_bias = nl.ndarray((batch_size, nl.par_dim(k), intermediate_size), 
-                                   dtype=mlp1_bias.dtype, buffer=nl.sbuf)
-
-    # for b in nl.static_range(batch_size):
-    #     # breaks
-    #     selected_mlp1_bias[b, k, :] = nl.load(mlp1_bias[expert_indices[b, k]])
-    
-    # maybe just load all 8 first, then select just the experts we need 
-    # mlp1_bias_tile = nl.load(mlp1_bias)
-
-    # Now we can index directly from the loaded tile
-    # for b in nl.static_range(batch_size):
-        
-    #     expert_bias_array = nl.ndarray((1, k), dtype=mlp1_bias.dtype, buffer=nl.sbuf)
-        
-    #     # assign the expert indices values for this token to a new array
-    #     expert_bias_array[...] = expert_indices[b, 0:k]
-
-    #     for e in expert_bias_array:
-
-    #         print (e)
-
-            # print (int(e))
-            # selected_mlp1_bias[b, e, :] = expert_bias_array
 
     return selected_mlp1_weights
     
@@ -331,7 +296,28 @@ def v2(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, ml
     
     # MLP1
     selected_mlp1_weights = load_mlp_weights_biases(batch_size, k, intermediate_size, hidden_size,mlp1_weight, mlp1_bias, expert_indices )
-    
+
+    # Create output tensor with k as partition dimension
+    selected_mlp1_bias = nl.ndarray((batch_size, nl.par_dim(k), intermediate_size), 
+                                   dtype=mlp1_bias.dtype, buffer=nl.hbm)
+
+    for b in nl.static_range(batch_size):
+
+        for e in nl.static_range(k):
+
+            # tile view of the expert ID shape (1,1)
+            expert_id = expert_indices[b, e]
+        
+            # create the view of the tensor on hbm using the tile for the index
+            one_expert_bias = mlp1_bias[expert_id, :]
+
+            # slow but working
+            one_expert_tile = nl.load(one_expert_bias)
+        
+            one_expert_tile_T = nl.transpose(one_expert_tile)
+        
+            nl.store(selected_mlp1_bias[b, e:e+1, 0:intermediate_size], value = one_expert_tile_T)
+
     nl.store(result[...], value = t)
     
     return result
