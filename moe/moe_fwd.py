@@ -279,8 +279,13 @@ def load_mlp_weights(batch_size, k, intermediate_size, hidden_size, mlp_weight, 
     
     return rt
 
-def load_mlp_bias(batch_size, k, intermediate_size, expert_indices, mlp1_bias, selected_mlp1_bias):
-                  
+def load_mlp_bias(batch_size, k, intermediate_size, hidden_size, expert_indices, mlp1_bias, selected_mlp_bias, mlp='1'):
+
+    if '1' in mlp:
+        fill_val = intermediate_size
+    elif '2' in mlp:
+        fill_val = hidden_size
+    
     for b in nl.static_range(batch_size):
     
             for e in nl.static_range(k):
@@ -296,9 +301,9 @@ def load_mlp_bias(batch_size, k, intermediate_size, expert_indices, mlp1_bias, s
             
                 one_expert_tile_T = nl.transpose(one_expert_tile)
             
-                nl.store(selected_mlp1_bias[b, e:e+1, 0:intermediate_size], value = one_expert_tile_T)
+                nl.store(selected_mlp_bias[b, e:e+1, 0:fill_val], value = one_expert_tile_T)
                 
-    return selected_mlp1_bias
+    return selected_mlp_bias
 
 def first_token_projection(batch_size, k, intermediate_size, hidden_size, selected_mlp1_weights, selected_mlp1_bias, t):
 
@@ -373,7 +378,7 @@ def v2(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, ml
     selected_mlp1_bias = nl.ndarray((batch_size, nl.par_dim(k), intermediate_size), 
                                    dtype=mlp1_bias.dtype, buffer=nl.hbm)
 
-    selected_mlp1_bias = load_mlp_bias(batch_size, k, intermediate_size, expert_indices, mlp1_bias, selected_mlp1_bias)
+    selected_mlp1_bias = load_mlp_bias(batch_size, k, intermediate_size, hidden_size, expert_indices, mlp1_bias, selected_mlp1_bias, mlp='1')
 
     t_out = first_token_projection(batch_size, k, intermediate_size, hidden_size, selected_mlp1_weights, selected_mlp1_bias, t) 
 
@@ -382,8 +387,10 @@ def v2(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, ml
     # MLP 2
     selected_mlp2_weights = load_mlp_weights(batch_size, k, intermediate_size, hidden_size, mlp2_weight, expert_indices, mlp='2')
 
+    selected_mlp2_bias = nl.ndarray((batch_size, nl.par_dim(k), hidden_size), 
+                                   dtype=mlp2_bias.dtype, buffer=nl.hbm)
 
-
+    selected_mlp2_bias = load_mlp_bias(batch_size, k, intermediate_size, hidden_size, expert_indices, mlp2_bias, selected_mlp2_bias, mlp='2')
 
 
 
