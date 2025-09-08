@@ -144,14 +144,15 @@ def v1(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, ml
     t_expanded = t[:, None, None, :].transpose(0, 1, 3, 2)  # (128, 1, 128, 1)
     t = np.matmul(selected_mlp1_weights, t_expanded)  #  (128, 4, 64, 1)
     t = t.squeeze(-1)  # s (128, 4, 64)
-    
+
+    # takes output of first token proj and cuts in half lengthwise 
     t = swiglu(t)    
 
     # MLP 2
-    selected_mlp_weight_2 = mlp2_weight[expert_indices] # (128, 4, 128, 32
+    selected_mlp_weight_2 = mlp2_weight[expert_indices] # (128, 4, 128, 32)
     
     selected_mlp_bias_2 = mlp2_bias[expert_indices] # (128, 4, 128)
-
+    
     # Equivalent to torch.einsum("beck,bek->bec", mlp2_weight, t)
     t_expanded = t[..., None]  # (128, 4, 32, 1)
     t = np.matmul(selected_mlp_weight_2, t_expanded)  #  (128, 4, 128, 1)
@@ -355,24 +356,41 @@ def load_mlp_bias(batch_size, k, intermediate_size, hidden_size, expert_indices,
                 
     return selected_mlp_bias
 
-def first_token_projection(batch_size, k, intermediate_size, hidden_size, selected_mlp1_weights, selected_mlp1_bias, t):
+def token_projection(batch_size, k, intermediate_size, hidden_size, selected_mlp_weights, selected_mlp_bias, t, direction = 'down'):
 
-    rt_token = nl.ndarray((batch_size, nl.par_dim(k), intermediate_size), dtype=selected_mlp1_weights.dtype, buffer=nl.sbuf)
+    if direction == 'down':
+        out_dim = intermediate_size
+        
+    elif direction == 'up':
+        in_dim = t.shape[-1]
+        out_dim = batch_size
+        
+    rt_token = nl.ndarray((batch_size, nl.par_dim(k), out_dim), dtype=selected_mlp_weights.dtype, buffer=nl.sbuf)
     
     for b in nl.static_range(batch_size):
 
         # pull a token slice to be used on this batch by all experts
-        one_token = t[b:b+1, 0:hidden_size]
+        if direction == 'down':
+            one_token = t[b:b+1, 0:hidden_size]
         
         for e in nl.static_range(k):
             
-            one_bias = nl.load(selected_mlp1_bias[b, e, :]) #(1, 128)
+            if direction == 'down':
+                one_bias = nl.load(selected_mlp_bias[b, e, :]) #(1, 128)
 
-            multiplied = nl.multiply(selected_mlp1_weights[b, e, :, :], one_token) + one_bias # (64, 128)
-            
+                multiplied = nl.multiply(selected_mlp_weights[b, e, :, :], one_token) + one_bias # (64, 128)
+
+
+            elif direction == 'up':
+
+                one_token = t[ b, e:e+1, 0:in_dim] # (1, 32)
+
+                multiplied = nl.multiply(selected_mlp_weights[b, e, :, :], one_token)
+                
+
             one_vector = nl.sum(multiplied, axis=-1) # (64, 1)
-
-            rt_token[b, e:e+1, 0:intermediate_size] = nl.transpose(one_vector) # (1, 64)
+                
+            rt_token[b, e:e+1, 0:out_dim] = nl.transpose(one_vector) # (1, 64)
 
     return rt_token
 
@@ -389,7 +407,7 @@ def mlp_runner(batch_size, k, intermediate_size, hidden_size, t, mlp_weight, mlp
         selected_mlp1_bias = load_mlp_bias(batch_size, k, intermediate_size, hidden_size, expert_indices, mlp_bias, selected_mlp1_bias, mlp='1')
     
         # bias is loaded and added here too 
-        t_out = first_token_projection(batch_size, k, intermediate_size, hidden_size, selected_mlp1_weights, selected_mlp1_bias, t) 
+        t_out = token_projection(batch_size, k, intermediate_size, hidden_size, selected_mlp1_weights, selected_mlp1_bias, t, direction = 'down') 
 
     # MLP 2
     elif '2' in mlp:
@@ -401,8 +419,7 @@ def mlp_runner(batch_size, k, intermediate_size, hidden_size, t, mlp_weight, mlp
     
         selected_mlp2_bias = load_mlp_bias(batch_size, k, intermediate_size, hidden_size, expert_indices, mlp_bias, selected_mlp2_bias, mlp='2')
 
-        # to do add second token projection
-    
+        t_out = token_projection(batch_size, k, intermediate_size, hidden_size, selected_mlp2_weights, selected_mlp2_bias, t, direction = 'up') 
         # to do add all_reduce here
     
         # to do add bias 
@@ -456,15 +473,13 @@ def v2(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, ml
     g = nl.matmul(t, gate_weight)
     g = nl.add(g, gate_bias)
 
-    # topk
-    
+    # topk    
     expert_indices, expert_values = nki_lang_topk(g, k) # (128, 4)
     expert_weights = nki_lang_softmax(expert_values)
     
     # MLP1
     t_o =  mlp_runner(batch_size, k, intermediate_size, hidden_size, t, mlp1_weight, mlp1_bias, expert_indices, mlp='1' )
-    
-    # to do add swiglu here
+
     t_o = nki_swiglu(t_o)
 
     # MLP2
