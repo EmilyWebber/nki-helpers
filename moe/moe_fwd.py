@@ -161,7 +161,8 @@ def v1(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, ml
     # Equivalent to torch.einsum("bec,be->bc", t, expert_weights)
     t = t * expert_weights[..., None] # (128, 4, 128)
     t = np.sum(t, axis=1)  # (128, 128)
-        
+
+    print ('Done with numpy moe fwd!')
     return t
 
 
@@ -263,12 +264,53 @@ def nki_lang_softmax(expert_values):
     return expert_weights
 
 
-def nki_lang_swiglu():
+@nki.jit
+def nki_swiglu(x, alpha=1.702, limit=7.0):
+    """
+    Input: x shape (128, 4, 64)
+    Output: shape (128, 4, 32)
+    """
+    batch_size, num_experts, intermediate_size = x.shape
+    output_size = intermediate_size // 2  # 32
+    
+    # Create output tensor with k as partition dimension
+    result = nl.ndarray((batch_size, nl.par_dim(num_experts), output_size), 
+                       dtype=x.dtype, buffer=nl.sbuf)
 
+    # Generate indices for all dimensions using mgrid
+    i_b, i_e, i_f = nl.mgrid[0:1, 0:1, 0:output_size]
+    
+    # Create indices for even and odd columns
+    i_f_even = 2 * i_f
+    i_f_odd = 2 * i_f + 1
 
+    ones = nl.ones((1, 1, output_size), dtype=x.dtype, buffer=nl.sbuf)
+    
+    for b in nl.static_range(batch_size):
+        for e in nl.static_range(num_experts):
+            
+            # Get both glu and linear parts using all advanced indexing
+            x_glu = x[i_b + b, i_e + e, i_f_even]
+            x_linear = x[i_b + b, i_e + e, i_f_odd]
+            
+            # Clamp values
+            x_glu = nl.minimum(x_glu, limit)  # upper bound only
+            x_linear = nl.minimum(nl.maximum(x_linear, -limit), limit)  # both bounds
+            
+            # Compute sigmoid(alpha * x_glu)
+            scaled_glu = nl.multiply(x_glu, alpha)
+            sigmoid_glu = nl.sigmoid(scaled_glu)
+            
+            # Compute final result: (x_glu * sigmoid(alpha * x_glu)) * (x_linear + 1)
+            glu_term = nl.multiply(x_glu, sigmoid_glu)
+            linear_plus_one = nl.add(x_linear, ones)
+            final = nl.multiply(glu_term, linear_plus_one)
+            
+            # Store result
+            result[i_b + b, i_e + e, i_f] = final
+            
+    return result
 
-
-    return 
 
 def load_mlp_weights(batch_size, k, intermediate_size, hidden_size, mlp_weight, expert_indices, mlp='1'):
 
@@ -415,16 +457,18 @@ def v2(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, ml
     g = nl.add(g, gate_bias)
 
     # topk
+    
     expert_indices, expert_values = nki_lang_topk(g, k) # (128, 4)
     expert_weights = nki_lang_softmax(expert_values)
     
     # MLP1
-    t_out =  mlp_runner(batch_size, k, intermediate_size, hidden_size, t, mlp1_weight, mlp1_bias, expert_indices, mlp='1' )
+    t_o =  mlp_runner(batch_size, k, intermediate_size, hidden_size, t, mlp1_weight, mlp1_bias, expert_indices, mlp='1' )
     
     # to do add swiglu here
+    t_o = nki_swiglu(t_o)
 
     # MLP2
-    t_out_2 =  mlp_runner(batch_size, k, intermediate_size, hidden_size, t, mlp2_weight, mlp2_bias, expert_indices, mlp='2' )
+    t_o =  mlp_runner(batch_size, k, intermediate_size, hidden_size, t_o, mlp2_weight, mlp2_bias, expert_indices, mlp='2' )
 
     # to do take weighted sum of experts
     
