@@ -3,13 +3,13 @@ This is a 12-step tutorial that shows how to iteratively develop and improve a N
 
 For simplicity, we'll start with a much smaller context length of only 128 tokens and a hidden size of 512. Then we'll work up to the larger shapes throughout the tutorial. We'll also start without the router, adding this later in the tutorial.
 '''
-
+import argparse
 import numpy as np
 from neuronxcc import nki
 import neuronxcc.nki.isa as nisa
 import neuronxcc.nki.language as nl
 
-def generate_input_shapes(tp=4, context_length = 128000, hidden_size = 2880, num_experts = 32):
+def generate_input_shapes(tp=4, context_length = 128, hidden_size = 128, num_experts = 32):
     '''
     Generates all shapes used throughout the tutorial, but takes different parameters based on which version you want to test.
     '''
@@ -262,6 +262,14 @@ def nki_lang_softmax(expert_values):
 
     return expert_weights
 
+
+def nki_lang_swiglu():
+
+
+
+
+    return 
+
 def load_mlp_weights(batch_size, k, intermediate_size, hidden_size, mlp_weight, expert_indices, mlp='1'):
 
     tp_degree = 4
@@ -315,12 +323,14 @@ def first_token_projection(batch_size, k, intermediate_size, hidden_size, select
         one_token = t[b:b+1, 0:hidden_size]
         
         for e in nl.static_range(k):
-
-            multiplied = nl.multiply(selected_mlp1_weights[b, e, :, :], one_token)
             
-            one_vector = nl.sum(multiplied, axis=-1)
+            one_bias = nl.load(selected_mlp1_bias[b, e, :]) #(1, 128)
 
-            rt_token[b, e:e+1, 0:intermediate_size] = nl.transpose(one_vector)
+            multiplied = nl.multiply(selected_mlp1_weights[b, e, :, :], one_token) + one_bias # (64, 128)
+            
+            one_vector = nl.sum(multiplied, axis=-1) # (64, 1)
+
+            rt_token[b, e:e+1, 0:intermediate_size] = nl.transpose(one_vector) # (1, 64)
 
     return rt_token
 
@@ -380,10 +390,11 @@ def v2(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, ml
 
     selected_mlp1_bias = load_mlp_bias(batch_size, k, intermediate_size, hidden_size, expert_indices, mlp1_bias, selected_mlp1_bias, mlp='1')
 
+    # bias is loaded and added here too 
     t_out = first_token_projection(batch_size, k, intermediate_size, hidden_size, selected_mlp1_weights, selected_mlp1_bias, t) 
 
-    # to do add the bias term
-
+    # to do add swiglu here
+    
     # MLP 2
     selected_mlp2_weights = load_mlp_weights(batch_size, k, intermediate_size, hidden_size, mlp2_weight, expert_indices, mlp='2')
 
@@ -392,8 +403,7 @@ def v2(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, ml
 
     selected_mlp2_bias = load_mlp_bias(batch_size, k, intermediate_size, hidden_size, expert_indices, mlp2_bias, selected_mlp2_bias, mlp='2')
 
-
-
+    # to do add all_reduce here
 
 
 
@@ -404,20 +414,19 @@ def v2(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, ml
 
 
 
-
 def main(version):
     
     if 'numpy' in version:
 
         # call generate shapes for this version 
         t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, mlp2_bias = generate_input_shapes(context_length = 128, 
-                                                                                                                 hidden_size=128)
+                                                                                                                 hidden_size = 128)
         t_out = v1(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, mlp2_bias)
 
     if 'lang' in version:
 
         t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, mlp2_bias = generate_input_shapes(context_length = 128, 
-                                                                                                                 hidden_size=128)
+                                                                                                                 hidden_size = 128)
         
         t_out = v2(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, mlp2_bias)
 
