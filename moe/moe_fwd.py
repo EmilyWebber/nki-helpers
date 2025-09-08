@@ -262,17 +262,22 @@ def nki_lang_softmax(expert_values):
 
     return expert_weights
 
-def load_mlp_weights(batch_size, k, intermediate_size, hidden_size, mlp1_weight, expert_indices, num_experts = 8 ):
+def load_mlp_weights(batch_size, k, intermediate_size, hidden_size, mlp_weight, expert_indices, mlp='1'):
 
-    selected_mlp1_weights = nl.ndarray((batch_size, k, nl.par_dim(intermediate_size), hidden_size), 
-                                     dtype=mlp1_weight.dtype, buffer=nl.sbuf)
-
+    tp_degree = 4
+    
+    if '1' in mlp:
+        rt = nl.ndarray((batch_size, k, nl.par_dim(intermediate_size), hidden_size), 
+                                     dtype=mlp_weight.dtype, buffer=nl.sbuf)
+    elif '2' in mlp:
+        rt = nl.ndarray((batch_size, k, nl.par_dim(hidden_size), hidden_size // tp_degree ), 
+                             dtype=mlp_weight.dtype, buffer=nl.sbuf)
+    
     for b in nl.static_range(batch_size):
         for e in nl.static_range(k):
-            selected_mlp1_weights[b, e, :, :] = nl.load(mlp1_weight[expert_indices[b, e]])
+            rt[b, e, :, :] = nl.load(mlp_weight[expert_indices[b, e]])
     
-
-    return selected_mlp1_weights
+    return rt
 
 def load_mlp_bias(batch_size, k, intermediate_size, expert_indices, mlp1_bias, selected_mlp1_bias):
                   
@@ -362,18 +367,30 @@ def v2(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, ml
     expert_indices, expert_values = nki_lang_topk(g, k) # (128, 4)
     expert_weights = nki_lang_softmax(expert_values)
     
-    # # MLP1
-    selected_mlp1_weights = load_mlp_weights(batch_size, k, intermediate_size, hidden_size, mlp1_weight,  expert_indices )
+    # MLP 1
+    selected_mlp1_weights = load_mlp_weights(batch_size, k, intermediate_size, hidden_size, mlp1_weight, expert_indices, mlp='1' )
 
-    # Create output tensor with k as partition dimension
     selected_mlp1_bias = nl.ndarray((batch_size, nl.par_dim(k), intermediate_size), 
                                    dtype=mlp1_bias.dtype, buffer=nl.hbm)
 
     selected_mlp1_bias = load_mlp_bias(batch_size, k, intermediate_size, expert_indices, mlp1_bias, selected_mlp1_bias)
 
-    t_out = first_token_projection(batch_size, k, intermediate_size, hidden_size, selected_mlp1_weights, selected_mlp1_bias, t)
+    t_out = first_token_projection(batch_size, k, intermediate_size, hidden_size, selected_mlp1_weights, selected_mlp1_bias, t) 
+
+    # to do add the bias term
+
+    # MLP 2
+    selected_mlp2_weights = load_mlp_weights(batch_size, k, intermediate_size, hidden_size, mlp2_weight, expert_indices, mlp='2')
 
 
+
+
+
+
+
+
+
+    
     nl.store(result[...], value = t)
     
     return result
