@@ -9,9 +9,37 @@ from neuronxcc import nki
 import neuronxcc.nki.isa as nisa
 import neuronxcc.nki.language as nl
 
+def generate_input_shapes(tp=4, context_length = 128000, hidden_size = 2880, num_experts = 32):
+    '''
+    Generates all shapes used throughout the tutorial, but takes different parameters based on which version you want to test.
+    '''
+
+    intermediate_size_per_device = (hidden_size * 2) // tp
+
+    experts_per_device = num_experts // tp 
+    
+    t = np.random.randn(context_length, hidden_size).astype(np.float16)
+    
+    scale = np.ones((1, hidden_size)).astype(np.float16)
+
+    gate_weight = np.random.randn(hidden_size, experts_per_device).astype(np.float16)
+
+    gate_bias = np.random.randn(1, experts_per_device).astype(np.float16)
+
+    mlp1_weight = np.random.randn(experts_per_device, intermediate_size_per_device, hidden_size).astype(np.float16)
+    
+    mlp1_bias = np.random.randn(experts_per_device, intermediate_size_per_device).astype(np.float16)
+
+    mlp2_weight = np.random.randn(experts_per_device, hidden_size,  hidden_size // tp).astype(np.float16)
+
+    mlp2_bias = np.random.randn(experts_per_device, hidden_size).astype(np.float16)
+
+    return t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, mlp2_bias
+
 ###############################
 # v1 - write MOE fwd in Numpy #
 ###############################
+
 def rms_norm(x, scale, eps=1e-05):  
     
     # Convert to float32 for better numerical stability
@@ -267,6 +295,25 @@ def load_mlp_bias(batch_size, k, intermediate_size, expert_indices, mlp1_bias, s
                 
     return selected_mlp1_bias
 
+def first_token_projection(batch_size, k, intermediate_size, hidden_size, selected_mlp1_weights, selected_mlp1_bias, t):
+
+    rt_token = nl.ndarray((batch_size, nl.par_dim(k), intermediate_size), dtype=selected_mlp1_weights.dtype, buffer=nl.sbuf)
+    
+    for b in nl.static_range(batch_size):
+
+        # pull a token slice to be used on this batch by all experts
+        one_token = t[b:b+1, 0:hidden_size]
+        
+        for e in nl.static_range(k):
+
+            multiplied = nl.multiply(selected_mlp1_weights[b, e, :, :], one_token)
+            
+            one_vector = nl.sum(multiplied, axis=-1)
+
+            rt_token[b, e:e+1, 0:intermediate_size] = nl.transpose(one_vector)
+
+    return rt_token
+
 
 @nki.jit
 def v2(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, mlp2_bias):
@@ -315,7 +362,7 @@ def v2(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, ml
     expert_indices, expert_values = nki_lang_topk(g, k) # (128, 4)
     expert_weights = nki_lang_softmax(expert_values)
     
-    # MLP1
+    # # MLP1
     selected_mlp1_weights = load_mlp_weights(batch_size, k, intermediate_size, hidden_size, mlp1_weight,  expert_indices )
 
     # Create output tensor with k as partition dimension
@@ -323,39 +370,16 @@ def v2(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, ml
                                    dtype=mlp1_bias.dtype, buffer=nl.hbm)
 
     selected_mlp1_bias = load_mlp_bias(batch_size, k, intermediate_size, expert_indices, mlp1_bias, selected_mlp1_bias)
-    
+
+    t_out = first_token_projection(batch_size, k, intermediate_size, hidden_size, selected_mlp1_weights, selected_mlp1_bias, t)
+
 
     nl.store(result[...], value = t)
     
     return result
 
 
-def generate_input_shapes(tp=4, context_length = 128000, hidden_size = 2880, num_experts = 32):
-    '''
-    Generates all shapes used throughout the tutorial, but takes different parameters based on which version you want to test.
-    '''
 
-    intermediate_size_per_device = (hidden_size * 2) // tp
-
-    experts_per_device = num_experts // tp 
-    
-    t = np.random.randn(context_length, hidden_size).astype(np.float16)
-    
-    scale = np.ones((1, hidden_size)).astype(np.float16)
-
-    gate_weight = np.random.randn(hidden_size, experts_per_device).astype(np.float16)
-
-    gate_bias = np.random.randn(1, experts_per_device).astype(np.float16)
-
-    mlp1_weight = np.random.randn(experts_per_device, intermediate_size_per_device, hidden_size).astype(np.float16)
-    
-    mlp1_bias = np.random.randn(experts_per_device, intermediate_size_per_device).astype(np.float16)
-
-    mlp2_weight = np.random.randn(experts_per_device, hidden_size,  hidden_size // tp).astype(np.float16)
-
-    mlp2_bias = np.random.randn(experts_per_device, hidden_size).astype(np.float16)
-
-    return t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, mlp2_bias
 
 def main(version):
     
