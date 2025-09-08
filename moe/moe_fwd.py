@@ -334,6 +334,42 @@ def first_token_projection(batch_size, k, intermediate_size, hidden_size, select
 
     return rt_token
 
+def mlp_runner(batch_size, k, intermediate_size, hidden_size, t, mlp_weight, mlp_bias, expert_indices, mlp='1' ):
+
+    # MLP1
+    if '1' in mlp:
+
+        selected_mlp1_weights = load_mlp_weights(batch_size, k, intermediate_size, hidden_size, mlp_weight, expert_indices, mlp='1' )
+    
+        selected_mlp1_bias = nl.ndarray((batch_size, nl.par_dim(k), intermediate_size), 
+                                       dtype=mlp_bias.dtype, buffer=nl.hbm)
+    
+        selected_mlp1_bias = load_mlp_bias(batch_size, k, intermediate_size, hidden_size, expert_indices, mlp_bias, selected_mlp1_bias, mlp='1')
+    
+        # bias is loaded and added here too 
+        t_out = first_token_projection(batch_size, k, intermediate_size, hidden_size, selected_mlp1_weights, selected_mlp1_bias, t) 
+
+    # MLP 2
+    elif '2' in mlp:
+        
+        selected_mlp2_weights = load_mlp_weights(batch_size, k, intermediate_size, hidden_size, mlp_weight, expert_indices, mlp='2')
+    
+        selected_mlp2_bias = nl.ndarray((batch_size, nl.par_dim(k), hidden_size), 
+                                       dtype=mlp_bias.dtype, buffer=nl.hbm)
+    
+        selected_mlp2_bias = load_mlp_bias(batch_size, k, intermediate_size, hidden_size, expert_indices, mlp_bias, selected_mlp2_bias, mlp='2')
+
+        # to do add second token projection
+    
+        # to do add all_reduce here
+    
+        # to do add bias 
+
+        # filler
+        t_out = nl.ones((128, 128), dtype=mlp_bias.dtype, buffer=nl.sbuf)
+
+    return t_out
+
 
 @nki.jit
 def v2(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, mlp2_bias):
@@ -382,31 +418,15 @@ def v2(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, ml
     expert_indices, expert_values = nki_lang_topk(g, k) # (128, 4)
     expert_weights = nki_lang_softmax(expert_values)
     
-    # MLP 1
-    selected_mlp1_weights = load_mlp_weights(batch_size, k, intermediate_size, hidden_size, mlp1_weight, expert_indices, mlp='1' )
-
-    selected_mlp1_bias = nl.ndarray((batch_size, nl.par_dim(k), intermediate_size), 
-                                   dtype=mlp1_bias.dtype, buffer=nl.hbm)
-
-    selected_mlp1_bias = load_mlp_bias(batch_size, k, intermediate_size, hidden_size, expert_indices, mlp1_bias, selected_mlp1_bias, mlp='1')
-
-    # bias is loaded and added here too 
-    t_out = first_token_projection(batch_size, k, intermediate_size, hidden_size, selected_mlp1_weights, selected_mlp1_bias, t) 
-
-    # to do add swiglu here
+    # MLP1
+    t_out =  mlp_runner(batch_size, k, intermediate_size, hidden_size, t, mlp1_weight, mlp1_bias, expert_indices, mlp='1' )
     
-    # MLP 2
-    selected_mlp2_weights = load_mlp_weights(batch_size, k, intermediate_size, hidden_size, mlp2_weight, expert_indices, mlp='2')
+    # to do add swiglu here
 
-    selected_mlp2_bias = nl.ndarray((batch_size, nl.par_dim(k), hidden_size), 
-                                   dtype=mlp2_bias.dtype, buffer=nl.hbm)
+    # MLP2
+    t_out_2 =  mlp_runner(batch_size, k, intermediate_size, hidden_size, t, mlp2_weight, mlp2_bias, expert_indices, mlp='2' )
 
-    selected_mlp2_bias = load_mlp_bias(batch_size, k, intermediate_size, hidden_size, expert_indices, mlp2_bias, selected_mlp2_bias, mlp='2')
-
-    # to do add all_reduce here
-
-
-
+    # to do take weighted sum of experts
     
     nl.store(result[...], value = t)
     
