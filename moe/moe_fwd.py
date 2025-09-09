@@ -1,7 +1,7 @@
 '''
 This is a 12-step tutorial that shows how to iteratively develop and improve a NKI kernels for mixture of experts. We focus on the MLP contraction for forward pass, and specifically the context encoding part. We use a TP-degree of 4, assuming a single Trn2 chip which has a default of 4 logical neuron cores. We'll also assume an input context length of 128K, an output sequence length of 4096, and experts per token of 4.
 
-For simplicity, we'll start with a much smaller context length of only 128 tokens and a hidden size of 512. Then we'll work up to the larger shapes throughout the tutorial. We'll also start without the router, adding this later in the tutorial.
+For simplicity, we'll start with a much smaller context length of only 128 tokens and a hidden size of 128. Then we'll work up to the larger shapes throughout the tutorial. We'll also start without the router, adding this later in the tutorial.
 '''
 import argparse
 import numpy as np
@@ -356,6 +356,7 @@ def load_mlp_bias(batch_size, k, intermediate_size, hidden_size, expert_indices,
                 
     return selected_mlp_bias
 
+# also adds bias
 def token_projection(batch_size, k, intermediate_size, hidden_size, selected_mlp_weights, selected_mlp_bias, t, direction = 'down'):
 
     if direction == 'down':
@@ -363,7 +364,7 @@ def token_projection(batch_size, k, intermediate_size, hidden_size, selected_mlp
         
     elif direction == 'up':
         in_dim = t.shape[-1]
-        out_dim = batch_size
+        out_dim = hidden_size
         
     rt_token = nl.ndarray((batch_size, nl.par_dim(k), out_dim), dtype=selected_mlp_weights.dtype, buffer=nl.sbuf)
     
@@ -374,19 +375,14 @@ def token_projection(batch_size, k, intermediate_size, hidden_size, selected_mlp
             one_token = t[b:b+1, 0:hidden_size]
         
         for e in nl.static_range(k):
-            
-            if direction == 'down':
-                one_bias = nl.load(selected_mlp_bias[b, e, :]) #(1, 128)
 
-                multiplied = nl.multiply(selected_mlp_weights[b, e, :, :], one_token) + one_bias # (64, 128)
-
-
-            elif direction == 'up':
+            if direction == 'up':
 
                 one_token = t[ b, e:e+1, 0:in_dim] # (1, 32)
 
-                multiplied = nl.multiply(selected_mlp_weights[b, e, :, :], one_token)
-                
+            one_bias = nl.load(selected_mlp_bias[b, e, :]) #(1, 128)
+
+            multiplied = nl.multiply(selected_mlp_weights[b, e, :, :], one_token) + one_bias # (64, 128)
 
             one_vector = nl.sum(multiplied, axis=-1) # (64, 1)
                 
@@ -405,8 +401,7 @@ def mlp_runner(batch_size, k, intermediate_size, hidden_size, t, mlp_weight, mlp
                                        dtype=mlp_bias.dtype, buffer=nl.hbm)
     
         selected_mlp1_bias = load_mlp_bias(batch_size, k, intermediate_size, hidden_size, expert_indices, mlp_bias, selected_mlp1_bias, mlp='1')
-    
-        # bias is loaded and added here too 
+
         t_out = token_projection(batch_size, k, intermediate_size, hidden_size, selected_mlp1_weights, selected_mlp1_bias, t, direction = 'down') 
 
     # MLP 2
@@ -420,12 +415,6 @@ def mlp_runner(batch_size, k, intermediate_size, hidden_size, t, mlp_weight, mlp
         selected_mlp2_bias = load_mlp_bias(batch_size, k, intermediate_size, hidden_size, expert_indices, mlp_bias, selected_mlp2_bias, mlp='2')
 
         t_out = token_projection(batch_size, k, intermediate_size, hidden_size, selected_mlp2_weights, selected_mlp2_bias, t, direction = 'up') 
-        # to do add all_reduce here
-    
-        # to do add bias 
-
-        # filler
-        t_out = nl.ones((128, 128), dtype=mlp_bias.dtype, buffer=nl.sbuf)
 
     return t_out
 
@@ -485,6 +474,8 @@ def v2(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, ml
     # MLP2
     t_o =  mlp_runner(batch_size, k, intermediate_size, hidden_size, t_o, mlp2_weight, mlp2_bias, expert_indices, mlp='2' )
 
+    # to do add all_reduce here
+    
     # to do take weighted sum of experts
     
     nl.store(result[...], value = t)
