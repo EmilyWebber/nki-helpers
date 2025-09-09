@@ -418,6 +418,36 @@ def mlp_runner(batch_size, k, intermediate_size, hidden_size, t, mlp_weight, mlp
 
     return t_out
 
+def weighted_expert_sum(batch_size, k, hidden_size, t, expert_weights):
+    '''
+    Inputs:
+        - t (128, 4, 128)
+        - expert_weights (128, 4)
+    Outputs:
+        - t (128, 128)
+    
+    For b in batch:
+        (k, hidden_size) @ (1, k)
+    '''
+
+    result_T = nl.ndarray([batch_size, hidden_size], dtype=t.dtype, buffer=nl.sbuf)
+
+    for b in nl.static_range(batch_size):
+        
+        token = t[b, 0:k, 0:hidden_size] # (4, 128)
+
+        token_T = nl.transpose(token) # (128, 4)
+
+        weights = expert_weights[b:b+1, :] # (1, 4)
+        
+        weighted = nl.multiply(token_T, weights)
+        
+        result_T[0:hidden_size, b:b+1] = nl.sum(weighted, axis=1)
+
+    # do final transpose 
+    result = nl.transpose(result_T)
+    
+    return result
 
 @nki.jit
 def v2(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, mlp2_bias):
@@ -467,18 +497,25 @@ def v2(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, ml
     expert_weights = nki_lang_softmax(expert_values)
     
     # MLP1
-    t_o =  mlp_runner(batch_size, k, intermediate_size, hidden_size, t, mlp1_weight, mlp1_bias, expert_indices, mlp='1' )
+    t =  mlp_runner(batch_size, k, intermediate_size, hidden_size, t, mlp1_weight, mlp1_bias, expert_indices, mlp='1' )
 
-    t_o = nki_swiglu(t_o)
+    t = nki_swiglu(t)
 
     # MLP2
-    t_o =  mlp_runner(batch_size, k, intermediate_size, hidden_size, t_o, mlp2_weight, mlp2_bias, expert_indices, mlp='2' )
+    t =  mlp_runner(batch_size, k, intermediate_size, hidden_size, t, mlp2_weight, mlp2_bias, expert_indices, mlp='2' )
 
     # to do add all_reduce here
     
     # to do take weighted sum of experts
+    t = weighted_expert_sum(batch_size, k, hidden_size, t, expert_weights)
     
-    nl.store(result[...], value = t)
+    filler = nl.ones(t.shape, dtype = t.dtype, buffer = nl.sbuf)
+    
+    # breaks
+    # nl.store(result, value = t)
+
+    # works
+    nl.store(result, value = filler)
     
     return result
 
