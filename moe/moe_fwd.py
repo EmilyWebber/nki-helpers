@@ -645,6 +645,41 @@ def nki_isa_topk(g, k=4, TILE_P=128):
     
     return expert_indices, expert_values
 
+def nki_isa_softmax(expert_values):
+    """
+    Compute softmax using NKI ISA operations
+    
+    Parameters:
+    -----------
+    expert_values : Tensor
+        Input tensor of shape [128, k] where k is typically 4
+        
+    Returns:
+    --------
+    expert_weights : Tensor
+        Softmax output of shape [128, k]
+    """
+    # 1. Find max values along expert dimension (k)
+    max_values = nisa.tensor_reduce(op=nl.max, data=expert_values, axis=1)  # Results in [128, 1]
+    
+    # 2. Subtract max for numerical stability
+    shifted_values = nisa.tensor_scalar(data=expert_values, op0=nl.subtract, operand0=max_values, engine=nisa.vector_engine)
+    
+    # 3. Compute exp
+    exp_values = nisa.activation(op=nl.exp, data=shifted_values, bias=None, scale=1.0)
+    
+    # 4. Sum across expert dimension
+    sum_exp = nisa.tensor_reduce(op=nl.add, data=exp_values, axis=1)  # Results in [128, 1]
+    
+    # 5. Compute reciprocal of sum
+    inverse_sum = nisa.reciprocal(data=sum_exp)
+    
+    # 6. Normalize (multiply by inverse sum)
+    expert_weights = nisa.tensor_scalar(data=exp_values, op0=nl.multiply, 
+                                        operand0=inverse_sum, engine=nisa.vector_engine, dtype=expert_values.dtype)
+    
+    return expert_weights
+
 
 @nki.jit
 def v3(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, mlp2_bias):
@@ -686,6 +721,9 @@ def v3(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, ml
     g = nisa.tensor_tensor(data1=g, data2 = bias_broadcast, op=nl.add)  # (128, 8)
 
     expert_indices, expert_values = nki_isa_topk(g)
+
+    # now add softmax
+    t = nki_isa_softmax(t)
 
     
 
