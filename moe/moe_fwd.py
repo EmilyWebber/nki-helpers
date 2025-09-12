@@ -610,6 +610,42 @@ def nki_rms_norm_isa(x, scale, eps=1e-05):
 
     return result
 
+def nki_isa_topk(g, k=4, TILE_P=128):
+    """
+    Compute top-k values and indices using NKI ISA operations
+    
+    Parameters:
+    -----------
+    g : Tensor
+        Input tensor of shape [128, 8]
+    k : int
+        Number of top values to select (default=4)
+    TILE_P : int
+        Partition size (default=128)
+        
+    Returns:
+    --------
+    expert_indices : Tensor [128, k]
+    expert_values : Tensor [128, k]
+    """
+    # Initialize output arrays
+    expert_indices = nisa.memset(shape=[TILE_P, k], value=0, dtype=g.dtype)
+    expert_values = nisa.memset(shape=[TILE_P, k], value=0, dtype=g.dtype)
+    
+    # Find top 8 values (since that's what the ISA supports)
+    top_vals = nisa.max8(src=g)  # Gets top 8 values
+    
+    # Find indices of these values
+    top_indices = nisa.nc_find_index8(data=g, vals=top_vals)
+    
+    # Since we only want k values, we'll copy just the first k entries
+    for i in nl.static_range(k):
+        expert_values[:, i] = nisa.tensor_copy(src=top_vals[:, i], dtype=g.dtype)
+        expert_indices[:, i] = nisa.tensor_copy(src=top_indices[:, i], dtype=g.dtype)
+    
+    return expert_indices, expert_values
+
+
 @nki.jit
 def v3(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, mlp2_bias):
     '''
@@ -648,6 +684,10 @@ def v3(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, ml
     g = nisa.nc_matmul(stationary=t, moving=gate_weight)  # [128, 128] @ [128, 8] -> [128, 8]
     bias_broadcast = nl.broadcast_to(gate_bias, shape=(batch_size, num_experts))
     g = nisa.tensor_tensor(data1=g, data2 = bias_broadcast, op=nl.add)  # (128, 8)
+
+    expert_indices, expert_values = nki_isa_topk(g)
+
+    
 
     filler = nl.ones(t.shape, dtype = t.dtype, buffer = nl.sbuf)
     result = nl.ndarray(t.shape, dtype = t.dtype, buffer = nl.hbm)
