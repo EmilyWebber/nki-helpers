@@ -610,9 +610,6 @@ def nki_rms_norm_isa(x, scale, eps=1e-05):
 
     return result
 
-
-
-
 @nki.jit
 def v3(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, mlp2_bias):
     '''
@@ -646,8 +643,13 @@ def v3(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, ml
     gate_weight = nl.load(gate_weight)
 
     t_out = nki_rms_norm_isa(t, scale)
-    
-    
+
+    # Gate projection
+    g = nisa.nc_matmul(stationary=t, moving=gate_weight)  # [128, 128] @ [128, 8] -> [128, 8]
+    bias_broadcast = nl.broadcast_to(gate_bias, shape=(batch_size, num_experts))
+    g = nisa.tensor_tensor(data1=g, data2 = bias_broadcast, op=nl.add)  
+
+
     filler = nl.ones(t.shape, dtype = t.dtype, buffer = nl.sbuf)
     result = nl.ndarray(t.shape, dtype = t.dtype, buffer = nl.hbm)
 
