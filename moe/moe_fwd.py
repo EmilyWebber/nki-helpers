@@ -647,8 +647,7 @@ def v3(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, ml
     # Gate projection
     g = nisa.nc_matmul(stationary=t, moving=gate_weight)  # [128, 128] @ [128, 8] -> [128, 8]
     bias_broadcast = nl.broadcast_to(gate_bias, shape=(batch_size, num_experts))
-    g = nisa.tensor_tensor(data1=g, data2 = bias_broadcast, op=nl.add)  
-
+    g = nisa.tensor_tensor(data1=g, data2 = bias_broadcast, op=nl.add)  # (128, 8)
 
     filler = nl.ones(t.shape, dtype = t.dtype, buffer = nl.sbuf)
     result = nl.ndarray(t.shape, dtype = t.dtype, buffer = nl.hbm)
