@@ -524,6 +524,95 @@ def v2(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, ml
 # v3 - write MOE fwd in NISA #
 ###############################
 
+def nki_rms_norm_isa(x, scale, eps=1e-05):
+    """
+    RMS Normalization implementation using NKI ISA optimized for batch_size=128
+
+    Parameters:
+    -----------
+    x : Tensor
+        Input tensor of shape [128, d] where:
+        128 is the batch size
+        d is the normalization dimension (typically the hidden size)
+    
+    scale : Tensor
+        Scale factor tensor of shape [d]
+        Must match the last dimension of x for broadcasting
+    
+    eps : float, default=1e-05
+        Small constant for numerical stability
+
+    Returns:
+    --------
+    Tensor
+        Normalized tensor with same shape as input [128, d]
+    """
+    batch_size, d = x.shape
+    
+    # Convert input to FP32 for better numerical stability
+    x_fp32 = nisa.tensor_copy(src=x, dtype=nl.float32)  # [128, d]
+
+    # 1. Square the input values using tensor_tensor
+    squared = nisa.tensor_tensor(
+        data1=x_fp32,     # [128, d]
+        data2=x_fp32,     # [128, d]
+        op=nl.multiply
+    )  # [128, d]
+
+    # 2. Create ones vector for mean reduction
+    ones = nisa.memset(shape=[d, 1], value=1.0/d, dtype=nl.float32)  # [d, 1]
+
+    # 3. Compute mean using matrix multiply
+    mean_squared = nisa.nc_matmul(
+        stationary=squared,  # [128, d]
+        moving=ones         # [d, 1]
+    )  # [128, 1]
+
+    # 4. Add epsilon and compute rsqrt
+    mean_squared_eps = nisa.tensor_scalar(
+        data=mean_squared,  # [128, 1]
+        op0=nl.add,
+        operand0=eps
+    )  # [128, 1]
+    
+    power_const = nisa.memset(
+        shape=mean_squared_eps.shape,  # [128, 1]
+        value=-0.5,
+        dtype=nl.float32
+    )
+    
+    rsqrt = nisa.tensor_tensor(
+        data1=mean_squared_eps,  # [128, 1]
+        data2=power_const,       # [128, 1]
+        op=nl.power,
+        dtype=nl.float32
+    )  # [128, 1]
+
+    # 5. Normalize using tensor_scalar (since rsqrt is [128, 1])
+    normalized = nisa.tensor_scalar(
+        data=x_fp32,      # [128, d]
+        op0=nl.multiply,
+        operand0=rsqrt    # [128, 1]
+    )  # [128, d]
+
+    # 6. Convert and transpose scale to make it [d, 1]
+    scale_fp32 = nisa.tensor_copy(src=scale, dtype=nl.float32)  # [d]
+    scale_transposed = nisa.nc_transpose(scale_fp32)  # [d, 1]
+
+    # Apply scale using nc_matmul
+    scaled = nisa.nc_matmul(
+        stationary=normalized,     # [128, d]
+        moving=scale_transposed    # [d, 1]
+    )  # [128, 1]
+
+    # Convert back to original dtype
+    result = nisa.tensor_copy(src=scaled, dtype=x.dtype)
+
+    return result
+
+
+
+
 @nki.jit
 def v3(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, mlp2_bias):
     '''
@@ -543,7 +632,21 @@ def v3(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, ml
         t_out = (128, 128)
         
     '''
+    # set parameters
+    k = 4
+    batch_size = t.shape[0]                    # 128
+    num_experts = mlp1_weight.shape[0]         # 8
+    intermediate_size = mlp1_weight.shape[1]   # 64
+    hidden_size = mlp1_weight.shape[2]         # 128
 
+    # Load tiles
+    t = nl.load(t)
+    scale = nl.load(scale)
+    gate_bias = nl.load(gate_bias)
+    gate_weight = nl.load(gate_weight)
+
+    t_out = nki_rms_norm_isa(t, scale)
+    
     
     filler = nl.ones(t.shape, dtype = t.dtype, buffer = nl.sbuf)
     result = nl.ndarray(t.shape, dtype = t.dtype, buffer = nl.hbm)
