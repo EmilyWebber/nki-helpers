@@ -651,8 +651,6 @@ def nki_bias_selection(mlp1_bias, expert_indices, batch, k, intermediate_size):
     selected_mlp1_bias = nl.ndarray((batch, nl.par_dim(k), intermediate_size), 
                                    dtype=mlp1_bias.dtype, buffer=nl.hbm)
 
-    expert_indices = nl.load(expert_indices)
-
     for b in nl.static_range(batch):
 
         for e in nl.static_range(k):
@@ -713,17 +711,23 @@ def v3(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, ml
 
     expert_indices, expert_values = nki_isa_topk(g)
 
-    # move expert indices back up to HBM
+    # move expert indices back up to HBM and then paradocially move back down to sbuf --> works, failing to do this breaks on a tensorizer error
     expert_indices_hbm = nl.ndarray(expert_indices.shape, expert_indices.dtype, buffer = nl.hbm)
     nl.store(expert_indices_hbm, expert_indices)
+    expert_indices = nl.load(expert_indices_hbm)
+
 
     t = nki_isa_softmax(t)
 
     # MLP1
 
     # load selected weights    
+    
+
+
+    
     # load selected bias
-    selected_mlp1_bias = nki_bias_selection(mlp1_bias, expert_indices_hbm, batch_size, k, intermediate_size)
+    selected_mlp1_bias = nki_bias_selection(mlp1_bias, expert_indices, batch_size, k, intermediate_size)
     
     # Create output tensor with k as partition dimension
 
