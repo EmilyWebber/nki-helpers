@@ -3,12 +3,11 @@ This is a 12-step tutorial that shows how to iteratively develop and improve a N
 
 For simplicity, we'll start with a much smaller context length of only 128 tokens and a hidden size of 128. Then we'll work up to the larger shapes throughout the tutorial. We'll also start without the router, adding this later in the tutorial.
 '''
+import argparse
 import numpy as np
 from neuronxcc import nki
 import neuronxcc.nki.isa as nisa
 import neuronxcc.nki.language as nl
-
-import os
 
 def generate_input_shapes(tp=4, context_length = 128, hidden_size = 128, num_experts = 32):
     '''
@@ -327,9 +326,7 @@ def load_mlp_weights(batch_size, k, intermediate_size, hidden_size, mlp_weight, 
     
     for b in nl.static_range(batch_size):
         for e in nl.static_range(k):
-            
-            one_tile = nl.load(mlp_weight[expert_indices[b, e]])
-            rt[b, e, :, :] = one_tile #(64, 128)
+            rt[b, e, :, :] = nl.load(mlp_weight[expert_indices[b, e]])
     
     return rt
 
@@ -350,7 +347,7 @@ def load_mlp_bias(batch_size, k, intermediate_size, hidden_size, expert_indices,
                 # create the view of the tensor on hbm using the tile on sbuf for the index
                 one_expert_bias = mlp1_bias[expert_id, :]
     
-                # slow but working, not really
+                # slow but working
                 one_expert_tile = nl.load(one_expert_bias)
             
                 one_expert_tile_T = nl.transpose(one_expert_tile)
@@ -419,7 +416,7 @@ def mlp_runner(batch_size, k, intermediate_size, hidden_size, t, mlp_weight, mlp
 
         t_out = token_projection(batch_size, k, intermediate_size, hidden_size, selected_mlp2_weights, selected_mlp2_bias, t, direction = 'up') 
 
-    return t_out, selected_mlp1_weights, selected_mlp1_bias
+    return t_out
 
 def weighted_expert_sum(batch_size, k, hidden_size, t, expert_weights):
     '''
@@ -479,6 +476,8 @@ def v2(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, ml
     intermediate_size = mlp1_weight.shape[1]   # 64
     hidden_size = mlp1_weight.shape[2]         # 128
 
+    result = nl.ndarray((t.shape), dtype = t.dtype, buffer = nl.shared_hbm)
+
     # Load tiles
 
     t = nl.load(t)
@@ -495,12 +494,11 @@ def v2(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, ml
 
     # topk    
     expert_indices, expert_values = nki_lang_topk(g, k) # (128, 4)
-
     expert_weights = nki_lang_softmax(expert_values)
     
     # MLP1
-    t_out, selected_mlp1_weights, selected_mlp1_bias = mlp_runner(batch_size, k, intermediate_size, hidden_size, t, mlp1_weight, mlp1_bias, expert_indices, mlp='1' )
-    
+    t =  mlp_runner(batch_size, k, intermediate_size, hidden_size, t, mlp1_weight, mlp1_bias, expert_indices, mlp='1' )
+
     t = nki_swiglu(t)
 
     # MLP2
@@ -508,42 +506,72 @@ def v2(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, ml
 
     # to do add all_reduce here
     
+    # to do take weighted sum of experts
     t = weighted_expert_sum(batch_size, k, hidden_size, t, expert_weights)
-
-    filler = nl.ones(t.shape, dtype = t.dtype, buffer = nl.sbuf)
-
-    result = nl.ndarray(shape = t.shape, dtype = t.dtype, buffer = nl.hbm)
     
+    filler = nl.ones(t.shape, dtype = t.dtype, buffer = nl.sbuf)
+    
+    # breaks
+    # nl.store(result, value = t)
+
     # works
     nl.store(result, value = filler)
+    
+    return result
 
-    # breaks
-    # nl.store(result, value = t
+
+###############################
+# v3 - write MOE fwd in NISA #
+###############################
+
+@nki.jit
+def v3(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, mlp2_bias):
+    '''
+    Does all operations for the MLPBlock forward pass in NKI ISA, assuming tiny shapes.
+    
+    Input tensors:
+        t = (128, 128)
+        scale = (1, 128)
+        gate_weight = (128, 8) 
+        gate_bias = (1, 8)
+        mlp1_weight = (8, 64, 128)
+        mlp1_bias = (8, 64)
+        mlp2_weight = (8, 128, 32)
+        mlp2_bias = (8, 128)
+
+    Output tensor:
+        t_out = (128, 128)
+        
+    '''
+
+    
+    filler = nl.ones(t.shape, dtype = t.dtype, buffer = nl.sbuf)
+    result = nl.ndarray(t.shape, dtype = t.dtype, buffer = nl.hbm)
+
+    # works
+    nl.store(result, value = filler)
     
     return result
 
 
 
 def main(version):
+
+    t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, mlp2_bias = generate_input_shapes(context_length = 128, hidden_size = 128)
     
     if 'numpy' in version:
 
-        # call generate shapes for this version 
-        t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, mlp2_bias = generate_input_shapes(context_length = 128, 
-                                                                                                                 hidden_size = 128)
         t_out = v1(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, mlp2_bias)
 
     if 'lang' in version:
 
-        t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, mlp2_bias = generate_input_shapes(context_length = 128, 
-                                                                                                                 hidden_size = 128)
-        
         t_out = v2(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, mlp2_bias)
 
-        breakpoint()
-
-    # assert t.shape == t_out.shape
+    if 'nisa' in version:
+        t_out = v3(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, mlp2_bias)
+    
+    assert t.shape == t_out.shape
 
 if __name__ == "__main__":
     
-    main(version = 'lang')
+    main(version = 'nisa')
