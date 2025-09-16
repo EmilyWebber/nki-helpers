@@ -89,65 +89,38 @@ def sample_selection_kernel(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_
     g = nl.add(g, gate_bias)
 
     # topk    
-    expert_indices, expert_values = nki_lang_topk(g, k) # (128, 4) valid integers on SBUF, can be returned to hbm and out of kernel
+    expert_indices, expert_values = nki_isa_topk(g, k) # (128, 4)
 
+    # works with indices on hbm, doesn't work with assignment on sbuf, but indirect indices tiles must be on sbuf per error statement, so sending back down to sbuf to use block dim properly
     experts_indices_hbm = nl.ndarray((nl.par_dim(1), batch_size, k), dtype = expert_indices.dtype, buffer = nl.hbm)
 
-    nl.store(experts_indices_hbm[0:1, 0:128:, 0:4:], expert_indices[0:128, 0:4])
-
-    return experts_indices_hbm
+    # inefficient but working loop from sbuf -> hbm -> sbuf
+    nl.store(experts_indices_hbm[0, 0:128, 0:4:], expert_indices[0:128, 0:4])
+    expert_indices_sbuf = nl.ndarray((nl.par_dim(1), batch_size, k), dtype = expert_indices.dtype, buffer = nl.sbuf)
+    expert_indices_sbuf[0:1, :, :] = nl.load(experts_indices_hbm[0:1, :, :])
     
-    # try to broadcast expert_indices to a different shape 
-    # expert_p = 1
-    # experts_reshaped = nl.ndarray((nl.par_dim(1), batch_size, k), dtype = expert_indices.dtype, buffer = nl.sbuf)
-
+    selected_weights = nl.ndarray((batch_size, k, nl.par_dim(intermediate_size), hidden_size), dtype=mlp1_weight.dtype, buffer=nl.sbuf)
     
-    # for b in nl.static_range(batch_size):
-    #     experts_reshaped[0:1, b:b+1, 0:k] = expert_indices[0:b, 0:k]
+    for b in nl.static_range(batch_size):
         
-
-    
-    # experts_reshaped[0:1, :, :] = expert_indices
-
-    # print (experts_reshaped.shape)
-
-    # out_indices = nl.ndarray(expert_indices.shape, dtype = expert_indices.dtype, buffer = nl.hbm)
-
-    # nl.store(out_indices, expert_indices)
-
-    # return out_indices
-
-    # expert_weights = nki_lang_softmax(expert_values)
-
-    # selected_weights = nl.ndarray((batch_size, k, nl.par_dim(intermediate_size), hidden_size), dtype=mlp1_weight.dtype, buffer=nl.sbuf)
-
-    # # totally unoptimal load the indices up to HBM, then load 
-    
-    # for b in nl.static_range(batch_size):
-        
-    #     for e in nl.static_range(k):
+        for e in nl.static_range(k):
             
-    #         expert_index_view = expert_indices[b, e]
+            expert_index_view = expert_indices_sbuf[0, b:b+1, :]
 
-    #         # works
-    #         # selected_weights[b, e, :, :] = nl.load(mlp1_weight[0, :, :]) #(64, 128)
+            selected_weights[b, e, :, :] = nl.load(mlp1_weight[expert_index_view[0, 0], :, :]) #(64, 128)
 
-    #         # fails
-    #         selected_weights[b, e, :, :] = nl.load(mlp1_weight[expert_index_view[0, 0], :, :]) #(64, 128)
+    one_weight = selected_weights[0, 0, :, :] # (64, 128)
 
-    # one_weight = selected_weights[0, 0, :, :] # (64, 128)
+    out_weight = nl.ndarray(shape = one_weight.shape, dtype = one_weight.dtype, buffer = nl.hbm)
 
-    # out_weight = nl.ndarray(shape = one_weight.shape, dtype = one_weight.dtype, buffer = nl.hbm)
+    nl.store(out_weight, one_weight)
 
-    # nl.store(out_weight, one_weight)
-
-    # return out_weight
+    return out_weight
     
 
 if __name__ == "__main__":
 
     t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, mlp2_bias = generate_input_shapes()
 
-    out = sample_selection_kernel(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, mlp2_bias)
+    out = sample_selection_kernel(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, mlp2_bias) # returns shape (64,128)
 
-    breakpoint()
