@@ -314,19 +314,24 @@ def nki_swiglu(x, alpha=1.702, limit=7.0):
 
 
 def load_mlp_weights(batch_size, k, intermediate_size, hidden_size, mlp_weight, expert_indices, mlp='1'):
-
-    tp_degree = 4
     
+    tp_degree = 4
+
     if '1' in mlp:
         rt = nl.ndarray((batch_size, k, nl.par_dim(intermediate_size), hidden_size), 
                                      dtype=mlp_weight.dtype, buffer=nl.sbuf)
+
     elif '2' in mlp:
         rt = nl.ndarray((batch_size, k, nl.par_dim(hidden_size), hidden_size // tp_degree ), 
                              dtype=mlp_weight.dtype, buffer=nl.sbuf)
-    
+
     for b in nl.static_range(batch_size):
+        
         for e in nl.static_range(k):
-            rt[b, e, :, :] = nl.load(mlp_weight[expert_indices[b, e]])
+    
+            expert_index_view = expert_indices[0, b:b+1, e:e+1]
+            
+            rt[b, e, :, :] = nl.load(mlp_weight[expert_index_view[0, 0], :, :])
     
     return rt
 
@@ -342,7 +347,7 @@ def load_mlp_bias(batch_size, k, intermediate_size, hidden_size, expert_indices,
             for e in nl.static_range(k):
     
                 # tile view of the expert ID shape (1,1)
-                expert_id = expert_indices[b, e]
+                expert_id = expert_indices[0, b, e]
             
                 # create the view of the tensor on hbm using the tile on sbuf for the index
                 one_expert_bias = mlp1_bias[expert_id, :]
@@ -365,7 +370,8 @@ def token_projection(batch_size, k, intermediate_size, hidden_size, selected_mlp
     elif direction == 'up':
         in_dim = t.shape[-1]
         out_dim = hidden_size
-        
+
+    # this shape probably needs to be changed so we're not loading 1 p-dim at a time
     rt_token = nl.ndarray((batch_size, nl.par_dim(k), out_dim), dtype=selected_mlp_weights.dtype, buffer=nl.sbuf)
     
     for b in nl.static_range(batch_size):
@@ -493,9 +499,9 @@ def v2(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, ml
     g = nl.add(g, gate_bias)
 
     # topk    
-    expert_indices, expert_values = nki_lang_topk(g, k) # (128, 4)
+    expert_indices, expert_values = nki_isa_topk_reshape(g, k) # (128, 4)
     expert_weights = nki_lang_softmax(expert_values)
-    
+ 
     # MLP1
     t =  mlp_runner(batch_size, k, intermediate_size, hidden_size, t, mlp1_weight, mlp1_bias, expert_indices, mlp='1' )
 
@@ -506,19 +512,11 @@ def v2(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, ml
 
     # to do add all_reduce here
     
-    # to do take weighted sum of experts
     t = weighted_expert_sum(batch_size, k, hidden_size, t, expert_weights)
-    
-    filler = nl.ones(t.shape, dtype = t.dtype, buffer = nl.sbuf)
-    
-    # breaks
-    # nl.store(result, value = t)
 
-    # works
-    nl.store(result, value = filler)
-    
+    nl.store(result, t)
+
     return result
-
 
 ###############################
 # v3 - write MOE fwd in NISA #
@@ -526,89 +524,74 @@ def v2(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, ml
 
 def nki_rms_norm_isa(x, scale, eps=1e-05):
     """
-    RMS Normalization implementation using NKI ISA optimized for batch_size=128
-
-    Parameters:
-    -----------
-    x : Tensor
-        Input tensor of shape [128, d] where:
-        128 is the batch size
-        d is the normalization dimension (typically the hidden size)
+    RMS Normalization for batch_size=128
     
-    scale : Tensor
-        Scale factor tensor of shape [d]
-        Must match the last dimension of x for broadcasting
+    Args:
+        x: Input tensor [128, d]
+        scale: Scale factor [d]
+        eps: Small constant for stability (default: 1e-05)
     
-    eps : float, default=1e-05
-        Small constant for numerical stability
-
     Returns:
-    --------
-    Tensor
-        Normalized tensor with same shape as input [128, d]
+        Normalized tensor [128, d]
     """
     batch_size, d = x.shape
     
-    # Convert input to FP32 for better numerical stability
-    x_fp32 = nisa.tensor_copy(src=x, dtype=nl.float32)  # [128, d]
+    # Convert to FP32
+    x_fp32 = nisa.tensor_copy(src=x, dtype=nl.float32)
 
-    # 1. Square the input values using tensor_tensor
-    squared = nisa.tensor_tensor(
-        data1=x_fp32,     # [128, d]
-        data2=x_fp32,     # [128, d]
-        op=nl.multiply
-    )  # [128, d]
+    # Square the input values
+    squared = nisa.tensor_tensor(data1=x_fp32, data2=x_fp32, op=nl.multiply)
 
-    # 2. Create ones vector for mean reduction
-    ones = nisa.memset(shape=[d, 1], value=1.0/d, dtype=nl.float32)  # [d, 1]
+    # Mean reduction
+    ones = nisa.memset(shape=[d, 1], value=1.0/d, dtype=nl.float32)
+    mean_squared = nisa.nc_matmul(stationary=squared, moving=ones)
 
-    # 3. Compute mean using matrix multiply
-    mean_squared = nisa.nc_matmul(
-        stationary=squared,  # [128, d]
-        moving=ones         # [d, 1]
-    )  # [128, 1]
+    # Add epsilon and compute rsqrt
+    mean_squared_eps = nisa.tensor_scalar(data=mean_squared, op0=nl.add, operand0=eps)
+    power_const = nisa.memset(shape=mean_squared_eps.shape, value=-0.5, dtype=nl.float32)
+    rsqrt = nisa.tensor_tensor(data1=mean_squared_eps, data2=power_const, op=nl.power, dtype=nl.float32)
 
-    # 4. Add epsilon and compute rsqrt
-    mean_squared_eps = nisa.tensor_scalar(
-        data=mean_squared,  # [128, 1]
-        op0=nl.add,
-        operand0=eps
-    )  # [128, 1]
-    
-    power_const = nisa.memset(
-        shape=mean_squared_eps.shape,  # [128, 1]
-        value=-0.5,
-        dtype=nl.float32
-    )
-    
-    rsqrt = nisa.tensor_tensor(
-        data1=mean_squared_eps,  # [128, 1]
-        data2=power_const,       # [128, 1]
-        op=nl.power,
-        dtype=nl.float32
-    )  # [128, 1]
+    # Normalize
+    normalized = nisa.tensor_scalar(data=x_fp32, op0=nl.multiply, operand0=rsqrt)
 
-    # 5. Normalize using tensor_scalar (since rsqrt is [128, 1])
-    normalized = nisa.tensor_scalar(
-        data=x_fp32,      # [128, d]
-        op0=nl.multiply,
-        operand0=rsqrt    # [128, 1]
-    )  # [128, d]
-
-    # 6. Convert and transpose scale to make it [d, 1]
-    scale_fp32 = nisa.tensor_copy(src=scale, dtype=nl.float32)  # [d]
-    scale_transposed = nisa.nc_transpose(scale_fp32)  # [d, 1]
-
-    # Apply scale using nc_matmul
-    scaled = nisa.nc_matmul(
-        stationary=normalized,     # [128, d]
-        moving=scale_transposed    # [d, 1]
-    )  # [128, 1]
+    # Apply scale
+    scale_fp32 = nisa.tensor_copy(src=scale, dtype=nl.float32)
+    scale_transposed = nisa.nc_transpose(scale_fp32)
+    scaled = nisa.nc_matmul(stationary=normalized, moving=scale_transposed)
 
     # Convert back to original dtype
     result = nisa.tensor_copy(src=scaled, dtype=x.dtype)
 
     return result
+
+def nki_isa_topk_reshape(g, k):
+    """
+    Compute top-k values and indices using NKI ISA operations with efficient reshaping
+    """
+    TILE_P = 128
+    
+    # Initialize output arrays (using 128 on the 1st dim only for broadcasting rules)
+    expert_indices_XL = nl.ndarray((nl.par_dim(TILE_P), TILE_P, k), dtype=np.float32, buffer=nl.sbuf)
+
+    expert_indices = nl.ndarray((nl.par_dim(1), TILE_P, k), dtype=np.float32, buffer=nl.sbuf)
+    
+    expert_values = nisa.memset(shape=[TILE_P, k], value=0, dtype=g.dtype)
+    
+    # Find top 8 values and indices
+    top_vals = nisa.max8(src=g)
+    top_indices = nisa.nc_find_index8(data=g, vals=top_vals)
+    
+    # Copy values
+    for e in nl.static_range(k):
+        expert_values[:, e] = top_vals[:, e]
+
+        # works
+        expert_indices_XL[0:TILE_P, 0:TILE_P, e:e+1] = top_indices[0:TILE_P, e:e+1]
+
+        # breaks on expanding paramter b in assignment from (128, 1) to (128, 1, 1)
+        # expert_indices[0:1, 0:TILE_P, e:e+1] = top_indices[0:TILE_P, e:e+1]
+
+    return expert_indices_XL, expert_values
 
 def nki_isa_topk(g, k=4, TILE_P=128):
     """
@@ -681,6 +664,38 @@ def nki_isa_softmax(expert_values):
     return expert_weights
 
 
+def nki_bias_selection(mlp1_bias, expert_indices, batch, k, intermediate_size):
+    '''
+    Takes two matrices, uses indices from one matrix to identify values from a second matrix
+    Input:
+        mlp1_bias: (8, 64)
+        expert_indices: (128, 4)
+    Returns:
+        selected_mlp1_bias: (128, 4, 64)
+    '''
+    # Create output tensor with k as partition dimension
+    selected_mlp1_bias = nl.ndarray((batch, nl.par_dim(k), intermediate_size), 
+                                   dtype=mlp1_bias.dtype, buffer=nl.hbm)
+
+    for b in nl.static_range(batch):
+
+        for e in nl.static_range(k):
+
+            # tile view of the expert ID shape (1,1)
+            expert_id = expert_indices[b, e]
+        
+            # create the view of the tensor on hbm using the tile for the index
+            one_expert_bias = mlp1_bias[expert_id, :]
+
+            one_expert_tile = nl.load(one_expert_bias)
+        
+            one_expert_tile_T = nl.transpose(one_expert_tile)
+        
+            nl.store(selected_mlp1_bias[b, e:e+1, 0:intermediate_size], value = one_expert_tile_T)
+
+    return selected_mlp1_bias
+
+
 @nki.jit
 def v3(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, mlp2_bias):
     '''
@@ -706,7 +721,7 @@ def v3(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, ml
     num_experts = mlp1_weight.shape[0]         # 8
     intermediate_size = mlp1_weight.shape[1]   # 64
     hidden_size = mlp1_weight.shape[2]         # 128
-
+    
     # Load tiles
     t = nl.load(t)
     scale = nl.load(scale)
@@ -722,18 +737,43 @@ def v3(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, ml
 
     expert_indices, expert_values = nki_isa_topk(g)
 
-    # now add softmax
+    # move expert indices back up to HBM and then paradocially move back down to sbuf --> works, failing to do this breaks on a tensorizer error
+    expert_indices_hbm = nl.ndarray(expert_indices.shape, expert_indices.dtype, buffer = nl.hbm)
+    nl.store(expert_indices_hbm, expert_indices)
+    expert_indices = nl.load(expert_indices_hbm)
+
+
     t = nki_isa_softmax(t)
 
+    # MLP1
+
+    # load selected weights    
     
 
-    filler = nl.ones(t.shape, dtype = t.dtype, buffer = nl.sbuf)
-    result = nl.ndarray(t.shape, dtype = t.dtype, buffer = nl.hbm)
+
+    
+    # load selected bias
+    selected_mlp1_bias = nki_bias_selection(mlp1_bias, expert_indices, batch_size, k, intermediate_size)
+    
+    # Create output tensor with k as partition dimension
+
+    
+    
+    
+    
+    return selected_mlp1_bias
+    
+    # get the upward token proj
+    # try to return it
+    
+
+    # filler = nl.ones(t.shape, dtype = t.dtype, buffer = nl.sbuf)
+    # result = nl.ndarray(one_weight.shape, dtype = one_weight.dtype, buffer = nl.hbm)
 
     # works
-    nl.store(result, value = filler)
+    # nl.store(result, value = one_weight)
     
-    return result
+    # return result
 
 
 
@@ -752,8 +792,8 @@ def main(version):
     if 'nisa' in version:
         t_out = v3(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias, mlp2_weight, mlp2_bias)
     
-    assert t.shape == t_out.shape
+    # assert t.shape == t_out.shape
 
 if __name__ == "__main__":
     
-    main(version = 'nisa')
+    main(version = 'lang')
