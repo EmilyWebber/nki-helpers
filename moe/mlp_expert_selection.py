@@ -104,8 +104,9 @@ def sample_selection_kernel(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_
     for b in nl.static_range(batch_size):
         
         for e in nl.static_range(k):
-            
-            expert_index_view = expert_indices_sbuf[0, b:b+1, :]
+
+            # grab just one expert per token
+            expert_index_view = expert_indices_sbuf[0, b:b+1, e:e+1]
 
             selected_weights[b, e, :, :] = nl.load(mlp1_weight[expert_index_view[0, 0], :, :]) #(64, 128)
 
