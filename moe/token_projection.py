@@ -15,6 +15,7 @@ from moe_fwd import (
 import os
 
 def select_bias(batch_size, expert_indices, k, intermediate_size, selected_mlp1_bias_T, mlp1_bias_T ):
+    
     for b in nl.static_range(batch_size):
 
         for e in nl.static_range(k):
@@ -76,15 +77,49 @@ def sample_token_projection(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_
 
     selected_mlp1_bias_T = nl.ndarray((batch_size, nl.par_dim(intermediate_size), k), dtype=mlp1_bias.dtype, buffer=nl.sbuf)
     
-    selected_mlp1_bias_T = select_bias(batch_size, expert_indices, k, intermediate_size, selected_mlp1_bias_T , mlp1_bias_T)
+    selected_mlp1_bias_T = select_bias(batch_size, expert_indices, k, intermediate_size, selected_mlp1_bias_T , mlp1_bias_T) # on sbuf as (128, 64, 4)
+
+    direction = 'down'
     
+    if direction == 'down':
+        out_dim = intermediate_size
+        
+    elif direction == 'up':
+        in_dim = t.shape[-1]
+        out_dim = hidden_size
 
-    one_bias = selected_mlp1_bias_T[0, :, :] #(1, 64, 4)
+    # this shape maybe needs to be changed so we're always moving at 32-dim or more at a time
+    rt_token = nl.ndarray((batch_size, nl.par_dim(k), out_dim), dtype=selected_mlp1_weights.dtype, buffer=nl.sbuf)
+    
+    for b in nl.static_range(batch_size):
 
-    out_array = nl.ndarray(one_bias.shape, dtype=selected_mlp1_bias_T.dtype, buffer=nl.hbm)
+        # pull a token slice to be used on this batch by all experts
+        if direction == 'down':
+            one_token = t[b:b+1, 0:hidden_size]
 
-    nl.store(out_array, one_bias)
+        for e in nl.static_range(k):
 
+            if direction == 'up':
+
+                one_token = t[ b, e:e+1, 0:in_dim] # (1, 32)
+
+            one_bias = selected_mlp1_bias_T[b, :, e] # (64, 1)
+
+            one_biasT = nl.transpose(one_bias) #(1, 64)
+
+            multiplied = nl.multiply(selected_mlp1_weights[b, e, :, :], one_token) + one_bias # (64, 128)
+
+            one_vector = nl.sum(multiplied, axis=-1) # (64, 1)
+                
+            rt_token[b, e:e+1, 0:out_dim] = nl.transpose(one_vector) # (1, 64)
+
+
+    one_token = rt_token[0:1, 0:k, 0:out_dim][0]
+
+    out_array = nl.ndarray((k, out_dim), dtype = rt_token.dtype, buffer = nl.hbm)
+
+    nl.store(out_array[:, :], one_token)
+    
     return out_array
 
 
