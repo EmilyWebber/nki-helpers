@@ -80,8 +80,38 @@ def load_mlp_bias(batch_size, k, intermediate_size, hidden_size, mlp1_bias_T, ex
                 nisa.dma_copy(dst =  expert_index_view[0:1, 0:1], src = expert_indices[b, e])
 
                 selected_bias_T[b, :, e] = nl.load(mlp1_bias_T[:, expert_index_view[0,0]])
+                
     return selected_bias_T
+
+def mlp_one_projection(batch_size, k, intermediate_size, hidden_size, mlp1_weight, mlp1_bias_T, expert_indices, t):
+
+    selected_weights = load_mlp_weights(batch_size, k, intermediate_size, hidden_size, mlp1_weight, expert_indices) # (128, 4, 64, 128)
+
+    selected_bias_T = load_mlp_bias(batch_size, k, intermediate_size, hidden_size, mlp1_bias_T, expert_indices) #(128, 64, 4)
     
+    rt_token_T = nl.ndarray((batch_size, nl.par_dim(intermediate_size), k), dtype=selected_weights.dtype, buffer=nl.sbuf)
+    
+    for b in nl.static_range(batch_size):
+
+        # pull a token slice to be used on this batch by all experts
+        one_token = nl.ndarray( (1, hidden_size), dtype = t.dtype, buffer = nl.sbuf)
+        
+        nisa.dma_copy(dst = one_token, src = t[b:b+1, 0:hidden_size] )
+            
+        for e in nl.static_range(k):
+
+            one_bias_T = selected_bias_T[b, :, e] #(64, 1)
+
+            one_weight = selected_weights[b, e, :, :] # (64, 128)
+
+            multiplied = nl.multiply(one_weight, one_token) + one_bias_T # (64, 128)
+
+            one_vector = nl.sum(multiplied, axis=-1) # (64, 1)
+                
+            rt_token_T[b, 0:intermediate_size, e:e+1, ] = one_vector 
+
+    return rt_token_T
+
 
 @nki.jit(debug_kernel=True)
 def sample_selection_kernel(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias_T, mlp2_weight, mlp2_bias_T):
@@ -124,30 +154,7 @@ def sample_selection_kernel(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_
     
     expert_indices, expert_values = nki_isa_topk(g, k) # (128, 4)
 
-    selected_weights = load_mlp_weights(batch_size, k, intermediate_size, hidden_size, mlp1_weight, expert_indices) # (128, 4, 64, 128)
-
-    selected_bias_T = load_mlp_bias(batch_size, k, intermediate_size, hidden_size, mlp1_bias_T, expert_indices) #(128, 64, 4)
-
-    rt_token_T = nl.ndarray((batch_size, nl.par_dim(intermediate_size), k), dtype=selected_weights.dtype, buffer=nl.sbuf)
-    
-    for b in nl.static_range(batch_size):
-
-        # pull a token slice to be used on this batch by all experts
-        one_token = nl.ndarray( (1, hidden_size), dtype = t.dtype, buffer = nl.sbuf)
-        
-        nisa.dma_copy(dst = one_token, src = t[b:b+1, 0:hidden_size] )
-            
-        for e in nl.static_range(k):
-
-            one_bias_T = selected_bias_T[b, :, e] #(64, 1)
-
-            one_weight = selected_weights[b, e, :, :] # (64, 128)
-
-            multiplied = nl.multiply(one_weight, one_token) + one_bias_T # (64, 128)
-
-            one_vector = nl.sum(multiplied, axis=-1) # (64, 1)
-                
-            rt_token_T[b, 0:intermediate_size, e:e+1, ] = one_vector 
+    rt_token_T = mlp_one_projection(batch_size, k, intermediate_size, hidden_size, mlp1_weight, mlp1_bias_T, expert_indices, t)
 
     one_token = rt_token_T[0, :, :] # (64, 4)
     
