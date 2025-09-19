@@ -112,6 +112,69 @@ def mlp_one_projection(batch_size, k, intermediate_size, hidden_size, mlp1_weigh
 
     return rt_token_T
 
+import neuronxcc.nki.isa as nisa
+
+@nki.jit
+def nki_swiglu_transposed(x, alpha=1.702, limit=7.0):
+    """
+    Input: x shape (128, 64, 4)
+    Output: shape (128, 32, 4)
+    """
+    batch_size, intermediate_size, k = x.shape
+    output_size = intermediate_size // 2  # 32
+    
+    result = nl.ndarray((batch_size, nl.par_dim(output_size), k), dtype=x.dtype, buffer=nl.sbuf)
+    
+    # Generate indices for dimensions using mgrid
+    i_b, i_f, i_e = nl.mgrid[0:1, 0:output_size, 0:k]
+    
+    # Create indices for even and odd columns from the input tensor size
+    i_f_even = 2 * i_f
+    i_f_odd = 2 * i_f + 1
+
+    items = []
+
+    x_glu = nl.ndarray((1, nl.par_dim(output_size), k), dtype = x.dtype, buffer = nl.sbuf)
+    x_linear = nl.ndarray((1, nl.par_dim(output_size), k), dtype = x.dtype, buffer = nl.sbuf)
+    x_int = nl.ndarray((1, nl.par_dim(output_size), k), dtype = x.dtype, buffer = nl.sbuf)
+    scaled_glu= nl.ndarray((1, nl.par_dim(output_size), k), dtype = x.dtype, buffer = nl.sbuf)
+    sigmoid_glu = nl.ndarray((1, nl.par_dim(output_size), k), dtype = x.dtype, buffer = nl.sbuf)
+    glu_term = nl.ndarray((1, nl.par_dim(output_size), k), dtype = x.dtype, buffer = nl.sbuf)
+    linear_plus_one = nl.ndarray((1, nl.par_dim(output_size), k), dtype = x.dtype, buffer = nl.sbuf)
+    final = nl.ndarray((1, nl.par_dim(output_size), k), dtype = x.dtype, buffer = nl.sbuf)
+    
+    for b in nl.static_range(batch_size):
+        
+        x_glu[0, i_f, i_e] = nisa.tensor_copy(x[b, i_f_even, i_e])
+
+        x_linear[0, i_f, i_e]  = nisa.tensor_copy(x[b, i_f_odd, i_e])
+
+        # Clamp x_glu (upper bound only)
+        x_glu[0, :, :] = nisa.tensor_scalar(x_glu[0, :, :], nl.minimum, limit)
+
+        # take greater than negative limit         
+        x_int[0, :, :] =  nisa.tensor_scalar(x_linear[0, :, :], nl.maximum, -limit)
+        
+        # then take less then positive limit
+        x_linear[0, :, : ]= nisa.tensor_scalar(x_int[0, :, :], nl.minimum, limit)
+
+        # SwiGLU computation
+        scaled_glu[0, :, :] = nisa.tensor_scalar(x_glu[0,:,:], nl.multiply, alpha)
+
+        sigmoid_glu[0,:,:] = nisa.activation(op = nl.sigmoid, data = scaled_glu[0,:,:])
+        
+        glu_term[0,:,:] = nisa.tensor_tensor(x_glu[0,:,:], sigmoid_glu[0,:,:], nl.multiply)
+
+        linear_plus_one[0,:,:] = nisa.tensor_scalar(x_linear[0,:,:], nl.add, 1.0)
+    
+        final[0, :, :] = nisa.tensor_tensor(glu_term[0,:,:], linear_plus_one[0,:,:], nl.multiply)
+
+        # Store result using indices
+        result[b, i_f, i_e] = final[0, i_f, i_e]
+    
+    return result
+
+
 
 @nki.jit(debug_kernel=True)
 def sample_selection_kernel(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias_T, mlp2_weight, mlp2_bias_T):
@@ -154,7 +217,11 @@ def sample_selection_kernel(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_
     
     expert_indices, expert_values = nki_isa_topk(g, k) # (128, 4)
 
-    rt_token_T = mlp_one_projection(batch_size, k, intermediate_size, hidden_size, mlp1_weight, mlp1_bias_T, expert_indices, t)
+    rt_token_T = mlp_one_projection(batch_size, k, intermediate_size, hidden_size, mlp1_weight, mlp1_bias_T, expert_indices, t) # (128, 64, 4)
+
+    # t = nki_swiglu_transposed(rt_token_T, alpha=1.702, limit=7.0) # (128, 32, 4)
+
+    # print (t.shape)
 
     one_token = rt_token_T[0, :, :] # (64, 4)
     
