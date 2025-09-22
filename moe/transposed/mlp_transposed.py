@@ -48,9 +48,18 @@ def nki_isa_topk(g, k=4, TILE_P=128):
     return expert_indices, expert_values
 
 
-def load_mlp_weights(batch_size, k, intermediate_size, hidden_size, mlp1_weight, expert_indices):
-    "Set for MLP1"    
-    selected_weights = nl.ndarray((batch_size, k, nl.par_dim(intermediate_size), hidden_size), dtype=mlp1_weight.dtype, buffer=nl.sbuf)
+def load_mlp_weights(batch_size, k, intermediate_size, hidden_size, mlp_weight, expert_indices, mlp='1'):
+
+    tp_degree = 4
+    
+    hidden_by_tp = hidden_size // tp_degree
+
+    if mlp == '1':
+        selected_weights = nl.ndarray((batch_size, k, nl.par_dim(intermediate_size), hidden_size), dtype=mlp1_weight.dtype, buffer=nl.sbuf)
+
+    elif mlp == '2':
+        selected_weights = nl.ndarray((batch_size, k, nl.par_dim(hidden_size), hidden_by_tp), dtype=mlp1_weight.dtype, buffer=nl.sbuf) # (128, 4, 128, 32)
+
     
     for b in nl.static_range(batch_size):
         
@@ -61,7 +70,7 @@ def load_mlp_weights(batch_size, k, intermediate_size, hidden_size, mlp1_weight,
             # need to use DMA copy to extract (1,1) index from the tensor
             nisa.dma_copy(dst =  expert_index_view[0:1, 0:1], src = expert_indices[b:b+1, e:e+1])
 
-            selected_weights[b, e, :, :] = nl.load(mlp1_weight[expert_index_view[0, 0], :, :])  #(64, 128)
+            selected_weights[b, e, :, :] = nl.load(mlp_weight[expert_index_view[0, 0], :, :])  #(64, 128)
 
     return selected_weights
 
@@ -208,6 +217,7 @@ def sample_selection_kernel(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_
     intermediate_size = mlp1_weight.shape[1]   # 64
     hidden_size = mlp1_weight.shape[2]         # 128
     tp_degree = 4
+    hidden_by_tp = hidden_size // tp_degree # 32
 
     # Load tiles
 
@@ -229,13 +239,26 @@ def sample_selection_kernel(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_
 
     t = nki_swiglu_dma_transpose(rt_token_T) # (128, 32, 4)
 
-    one_token = t[0, :, :] # (64, 4)
+
+    selected_weights_2 = load_mlp_weights(batch_size, k, intermediate_size, hidden_size, mlp2_weight, expert_indices, mlp='2')
     
-    out_token = nl.ndarray( shape = one_token.shape, dtype = one_token.dtype, buffer = nl.hbm)
 
-    nl.store( out_token, one_token)
+    one_expert = selected_weights_2[ 0, 0, :, :]
 
-    return out_token
+    out_expert = nl.ndarray( shape = one_expert.shape, dtype = one_expert.dtype, buffer = nl.hbm)
+
+    nl.store( out_expert, one_expert)
+
+    return out_expert
+
+    
+    # one_token = t[0, :, :] # (64, 4)
+    
+    # out_token = nl.ndarray( shape = one_token.shape, dtype = one_token.dtype, buffer = nl.hbm)
+
+    # nl.store( out_token, one_token)
+
+    # return out_token
     
 
 if __name__ == "__main__":
