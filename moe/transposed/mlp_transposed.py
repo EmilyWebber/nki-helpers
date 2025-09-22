@@ -112,10 +112,7 @@ def mlp_one_projection(batch_size, k, intermediate_size, hidden_size, mlp1_weigh
 
     return rt_token_T
 
-import neuronxcc.nki.isa as nisa
-
-@nki.jit
-def nki_swiglu_transposed(x, alpha=1.702, limit=7.0):
+def nki_swiglu_dma_transpose(x, alpha=1.702, limit=7.0):
     """
     Input: x shape (128, 64, 4)
     Output: shape (128, 32, 4)
@@ -125,55 +122,66 @@ def nki_swiglu_transposed(x, alpha=1.702, limit=7.0):
     
     result = nl.ndarray((batch_size, nl.par_dim(output_size), k), dtype=x.dtype, buffer=nl.sbuf)
     
-    # Generate indices for dimensions using mgrid
-    i_b, i_f, i_e = nl.mgrid[0:1, 0:output_size, 0:k]
+    # Generate tensor indices using arange
+    i_k = nl.arange(k)[:, None]
+    i_out = nl.arange(output_size)[None, :]
+    i_int = nl.arange(intermediate_size)[None, :]
+
+    i_out_p = nl.arange(output_size)[:, None]
+    i_k_f = nl.arange(k)[None, :]
     
-    # Create indices for even and odd columns from the input tensor size
-    i_f_even = 2 * i_f
-    i_f_odd = 2 * i_f + 1
+    # Create split pattern indices based on the output tensor size
+    i_f_even = 2 * i_out
+    i_f_odd = 2 * i_out + 1
 
-    items = []
-
-    x_glu = nl.ndarray((1, nl.par_dim(output_size), k), dtype = x.dtype, buffer = nl.sbuf)
-    x_linear = nl.ndarray((1, nl.par_dim(output_size), k), dtype = x.dtype, buffer = nl.sbuf)
-    x_int = nl.ndarray((1, nl.par_dim(output_size), k), dtype = x.dtype, buffer = nl.sbuf)
-    scaled_glu= nl.ndarray((1, nl.par_dim(output_size), k), dtype = x.dtype, buffer = nl.sbuf)
-    sigmoid_glu = nl.ndarray((1, nl.par_dim(output_size), k), dtype = x.dtype, buffer = nl.sbuf)
-    glu_term = nl.ndarray((1, nl.par_dim(output_size), k), dtype = x.dtype, buffer = nl.sbuf)
-    linear_plus_one = nl.ndarray((1, nl.par_dim(output_size), k), dtype = x.dtype, buffer = nl.sbuf)
-    final = nl.ndarray((1, nl.par_dim(output_size), k), dtype = x.dtype, buffer = nl.sbuf)
+    x_transposed = nl.ndarray((1, nl.par_dim(k), intermediate_size), dtype=x.dtype, buffer=nl.sbuf)
+    
+    x_glu = nl.ndarray((1, nl.par_dim(k), output_size), dtype=x.dtype, buffer=nl.sbuf)
+    x_linear = nl.ndarray((1, nl.par_dim(k), output_size), dtype=x.dtype, buffer=nl.sbuf)
+    
+    x_int = nl.ndarray((1, nl.par_dim(k), output_size), dtype=x.dtype, buffer=nl.sbuf)
+    scaled_glu = nl.ndarray((1, nl.par_dim(k), output_size), dtype=x.dtype, buffer=nl.sbuf)
+    sigmoid_glu = nl.ndarray((1, nl.par_dim(k), output_size), dtype=x.dtype, buffer=nl.sbuf)
+    glu_term = nl.ndarray((1, nl.par_dim(k), output_size), dtype=x.dtype, buffer=nl.sbuf)
+    linear_plus_one = nl.ndarray((1, nl.par_dim(k), output_size), dtype=x.dtype, buffer=nl.sbuf)
+    final = nl.ndarray((1, nl.par_dim(output_size), k), dtype=x.dtype, buffer=nl.sbuf)
     
     for b in nl.static_range(batch_size):
+        # First DMA transpose the input
+        x_transposed[0, :, :] = nisa.dma_transpose(x[b, :, :], axes=(1, 0)) # (1, 4, 64)
         
-        x_glu[0, i_f, i_e] = nisa.tensor_copy(x[b, i_f_even, i_e])
-
-        x_linear[0, i_f, i_e]  = nisa.tensor_copy(x[b, i_f_odd, i_e])
+        # Perform the split using advanced indexing
+        x_glu[0, i_k, i_out] = x_transposed[0, i_k, i_f_even]
+        x_linear[0, i_k, i_out] = x_transposed[0, i_k, i_f_odd]
 
         # Clamp x_glu (upper bound only)
         x_glu[0, :, :] = nisa.tensor_scalar(x_glu[0, :, :], nl.minimum, limit)
 
         # take greater than negative limit         
-        x_int[0, :, :] =  nisa.tensor_scalar(x_linear[0, :, :], nl.maximum, -limit)
+        x_int[0, :, :] = nisa.tensor_scalar(x_linear[0, :, :], nl.maximum, -limit)
         
         # then take less then positive limit
-        x_linear[0, :, : ]= nisa.tensor_scalar(x_int[0, :, :], nl.minimum, limit)
+        x_linear[0, :, :] = nisa.tensor_scalar(x_int[0, :, :], nl.minimum, limit)
 
         # SwiGLU computation
         scaled_glu[0, :, :] = nisa.tensor_scalar(x_glu[0,:,:], nl.multiply, alpha)
 
-        sigmoid_glu[0,:,:] = nisa.activation(op = nl.sigmoid, data = scaled_glu[0,:,:])
+        sigmoid_glu[0,:,:] = nisa.activation(op=nl.sigmoid, data=scaled_glu[0,:,:])
         
         glu_term[0,:,:] = nisa.tensor_tensor(x_glu[0,:,:], sigmoid_glu[0,:,:], nl.multiply)
 
         linear_plus_one[0,:,:] = nisa.tensor_scalar(x_linear[0,:,:], nl.add, 1.0)
-    
-        final[0, :, :] = nisa.tensor_tensor(glu_term[0,:,:], linear_plus_one[0,:,:], nl.multiply)
+        
+        # Transpose both terms before the final multiplication
+        glu_term_t = nisa.dma_transpose(glu_term[0,:,:], axes=(1, 0))
+        linear_plus_one_t = nisa.dma_transpose(linear_plus_one[0,:,:], axes=(1, 0))
+        
+        final[0, :, :] = nisa.tensor_tensor(glu_term_t, linear_plus_one_t, nl.multiply) # (1, 32, 4)
 
         # Store result using indices
-        result[b, i_f, i_e] = final[0, i_f, i_e]
+        result[b, i_out_p, i_k_f] = final[0, i_out_p, i_k_f]
     
     return result
-
 
 
 @nki.jit(debug_kernel=True)
@@ -219,11 +227,9 @@ def sample_selection_kernel(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_
 
     rt_token_T = mlp_one_projection(batch_size, k, intermediate_size, hidden_size, mlp1_weight, mlp1_bias_T, expert_indices, t) # (128, 64, 4)
 
-    # t = nki_swiglu_transposed(rt_token_T, alpha=1.702, limit=7.0) # (128, 32, 4)
+    t = nki_swiglu_dma_transpose(rt_token_T) # (128, 32, 4)
 
-    # print (t.shape)
-
-    one_token = rt_token_T[0, :, :] # (64, 4)
+    one_token = t[0, :, :] # (64, 4)
     
     out_token = nl.ndarray( shape = one_token.shape, dtype = one_token.dtype, buffer = nl.hbm)
 
