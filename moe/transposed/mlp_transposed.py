@@ -74,11 +74,15 @@ def load_mlp_weights(batch_size, k, intermediate_size, hidden_size, mlp_weight, 
 
     return selected_weights
 
-def load_mlp_bias(batch_size, k, intermediate_size, hidden_size, mlp1_bias_T, expert_indices):
-    "Set for MLP1"
-    
-    selected_bias_T = nl.ndarray((batch_size, nl.par_dim(intermediate_size), k), dtype = mlp1_bias_T.dtype, buffer = nl.sbuf)
+def load_mlp_bias(batch_size, k, intermediate_size, hidden_size, mlp_bias_T, expert_indices, mlp='1'):
 
+    if mlp == '1':
+        selected_bias_T = nl.ndarray((batch_size, nl.par_dim(intermediate_size), k), dtype = mlp_bias_T.dtype, buffer = nl.sbuf)
+
+    elif mlp == '2':
+        selected_bias_T = nl.ndarray((batch_size, nl.par_dim(hidden_size), k), dtype = mlp_bias_T.dtype, buffer = nl.sbuf)
+
+    
     for b in nl.static_range(batch_size):
     
             for e in nl.static_range(k):
@@ -88,7 +92,7 @@ def load_mlp_bias(batch_size, k, intermediate_size, hidden_size, mlp1_bias_T, ex
                 # need to use DMA copy to extract (1,1) index from the tensor
                 nisa.dma_copy(dst =  expert_index_view[0:1, 0:1], src = expert_indices[b, e])
 
-                selected_bias_T[b, :, e] = nl.load(mlp1_bias_T[:, expert_index_view[0,0]])
+                selected_bias_T[b, :, e] = nl.load(mlp_bias_T[:, expert_index_view[0,0]])
                 
     return selected_bias_T
 
@@ -239,17 +243,17 @@ def sample_selection_kernel(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_
 
     t = nki_swiglu_dma_transpose(rt_token_T) # (128, 32, 4)
 
-
     selected_weights_2 = load_mlp_weights(batch_size, k, intermediate_size, hidden_size, mlp2_weight, expert_indices, mlp='2')
     
+    selected_bias2_T = load_mlp_bias(batch_size, k, intermediate_size, hidden_size, mlp2_bias_T, expert_indices, mlp='2')
+    
+    one_bias = selected_bias2_T[ 0, :, :]
 
-    one_expert = selected_weights_2[ 0, 0, :, :]
+    out_bias = nl.ndarray( shape = one_bias.shape, dtype = one_bias.dtype, buffer = nl.hbm)
 
-    out_expert = nl.ndarray( shape = one_expert.shape, dtype = one_expert.dtype, buffer = nl.hbm)
+    nl.store( out_bias, one_bias)
 
-    nl.store( out_expert, one_expert)
-
-    return out_expert
+    return out_bias
 
     
     # one_token = t[0, :, :] # (64, 4)
