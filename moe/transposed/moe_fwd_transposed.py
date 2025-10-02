@@ -338,10 +338,10 @@ def weighted_expert_sum(batch_size, hidden_size, k, expert_values, t):
 
 
 @nki.jit(debug_kernel=True)
-def sample_selection_kernel(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias_T, mlp2_weight, mlp2_bias_T):
+def moe_mlp_fwd(x, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias_T, mlp2_weight, mlp2_bias_T):
     '''     
     Input tensors:
-        t = (128, 128)
+        x = (128, 128)
         scale = (1, 128)
         gate_weight = (128, 8) 
         gate_bias = (1, 8)
@@ -351,12 +351,12 @@ def sample_selection_kernel(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_
         mlp2_bias_T = (128, 8)
     
     Output tensor:
-        out_weight = (64, 128)
+        t = (128, 128)
     '''  
 
     # set parameters
     k = 4
-    batch_size = t.shape[0]                    # 128
+    batch_size = x.shape[0]                    # 128
     num_experts = mlp1_weight.shape[0]         # 8
     intermediate_size = mlp1_weight.shape[1]   # 64
     hidden_size = mlp1_weight.shape[2]         # 128
@@ -365,7 +365,8 @@ def sample_selection_kernel(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_
 
     # Load tiles
 
-    t = nl.load(t)
+    x_sbuf = nl.load(x)
+    t = nl.load(x)
     scale = nl.load(scale)
     gate_bias = nl.load(gate_bias)
     gate_weight = nl.load(gate_weight)
@@ -379,17 +380,17 @@ def sample_selection_kernel(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_
     
     expert_indices, expert_values = nki_isa_topk(g, k) # (128, 4)
 
-    rt_token_T = mlp_one_projection(batch_size, k, intermediate_size, hidden_size, mlp1_weight, mlp1_bias_T, expert_indices, t) # (128, 64, 4)
+    t = mlp_one_projection(batch_size, k, intermediate_size, hidden_size, mlp1_weight, mlp1_bias_T, expert_indices, t) # (128, 64, 4)
 
-    t = nki_swiglu_dma_transpose(rt_token_T) # (128, 32, 4)
+    t = nki_swiglu_dma_transpose(t) # (128, 32, 4)
 
     t = mlp_two_projection(batch_size, k, intermediate_size, hidden_size, hidden_by_tp, mlp2_weight, expert_indices, mlp2_bias_T, t) # (128, 128, 4)
 
-    out_tokens = weighted_expert_sum(batch_size, hidden_size, k, expert_values, t)
+    t = weighted_expert_sum(batch_size, hidden_size, k, expert_values, t)
 
-    out_tokens_hbm = nl.ndarray( shape = (batch_size, hidden_size), dtype = out_tokens.dtype, buffer = nl.hbm)
+    out_tokens_hbm = nl.ndarray(shape = (batch_size, hidden_size), dtype = t.dtype, buffer = nl.hbm)
 
-    out_tokens_T = nl.transpose(out_tokens)
+    out_tokens_T = nl.transpose(t) + x_sbuf
 
     nl.store(out_tokens_hbm, out_tokens_T)
 
@@ -400,6 +401,6 @@ if __name__ == "__main__":
 
     t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias_T, mlp2_weight, mlp2_bias_T = generate_input_shapes()
 
-    out = sample_selection_kernel(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias_T, mlp2_weight, mlp2_bias_T) # returns shape (64,128)
+    out = moe_mlp_fwd(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias_T, mlp2_weight, mlp2_bias_T) # returns shape (64,128)
 
     breakpoint()
