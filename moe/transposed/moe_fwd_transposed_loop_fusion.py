@@ -78,6 +78,10 @@ def moe_mlp_fwd_fused(x, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias_T
     
     selected_bias_T_2 = load_mlp_bias(batch_size, k, intermediate_size, hidden_size, mlp2_bias_T, expert_indices, mlp='2')
 
+    expert_weights = nki_isa_softmax(expert_values) # (128, 4)
+
+    expert_weights_T = nl.transpose(expert_weights) # (, 128)
+
     # do the expert weight and transpose here
 
     # for b in nl.static_range(batch_size): 
