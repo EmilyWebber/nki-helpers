@@ -137,7 +137,7 @@ def mlp_two_projection(batch_size, k, intermediate_size, hidden_size, hidden_by_
             
         for e in nl.static_range(k):
 
-            # pull a token slice to be used on this batch by all experts
+            # this mlp has one token per expert
             one_token = nl.ndarray( (hidden_by_tp, 1), dtype = t.dtype, buffer = nl.sbuf) # (32, 1)
             
             one_token = nisa.tensor_copy(src = t[b, 0:hidden_by_tp, e] )
