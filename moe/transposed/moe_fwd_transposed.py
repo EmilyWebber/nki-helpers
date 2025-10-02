@@ -303,6 +303,39 @@ def nki_swiglu_dma_transpose(x, alpha=1.702, limit=7.0):
     
     return result
 
+def weighted_expert_sum(batch_size, hidden_size, k, expert_values, t):
+    
+    expert_weights = nki_isa_softmax(expert_values) # (128, 4)
+
+    expert_weights_T = nl.transpose(expert_weights) # (4, 128)
+
+    out_tokens = nl.ndarray((batch_size, hidden_size), dtype = t.dtype, buffer = nl.sbuf)
+
+    for b in nl.static_range(batch_size):
+
+        one_token = nl.ndarray( (hidden_size, k), dtype = t.dtype, buffer = nl.sbuf)
+
+        one_token = nisa.tensor_copy(src = t[ b, :, :])
+
+        one_weight = nl.ndarray( (k, 1), dtype = expert_weights.dtype, buffer = nl.sbuf)
+
+        one_weight_T = nisa.tensor_copy(src = expert_weights_T[:, b:b+1])
+
+        one_token_T = nl.transpose(one_token) # (4, 128)
+
+        # problematic
+        # one_weight_T = nisa.nc_transpose(one_weight) # (4, 1)
+
+        weighted = nisa.tensor_tensor(one_token_T, one_weight_T, nl.multiply) # now (4, 128)
+
+        weighted_T = nl.transpose(weighted) # back to (128, 4)
+
+        summed = nl.sum(weighted_T, axis=1) # (128, 1)
+
+        out_tokens[ :, b:b+1 ] = summed
+
+    return out_tokens
+
 
 @nki.jit(debug_kernel=True)
 def sample_selection_kernel(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias_T, mlp2_weight, mlp2_bias_T):
@@ -350,31 +383,18 @@ def sample_selection_kernel(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_
 
     t = nki_swiglu_dma_transpose(rt_token_T) # (128, 32, 4)
 
-    out_tokens_T = mlp_two_projection(batch_size, k, intermediate_size, hidden_size, hidden_by_tp, mlp2_weight, expert_indices, mlp2_bias_T, t) # (128, 128, 4)
+    t = mlp_two_projection(batch_size, k, intermediate_size, hidden_size, hidden_by_tp, mlp2_weight, expert_indices, mlp2_bias_T, t) # (128, 128, 4)
 
-    expert_weights = nki_isa_softmax(expert_values)
+    out_tokens = weighted_expert_sum(batch_size, hidden_size, k, expert_values, t)
 
-    print (expert_weights.shape)
+    out_tokens_hbm = nl.ndarray( shape = (batch_size, hidden_size), dtype = out_tokens.dtype, buffer = nl.hbm)
 
-    
-    
-    # one_bias = selected_bias2_T[ 0, :, :]
+    out_tokens_T = nl.transpose(out_tokens)
 
-    # out_bias = nl.ndarray( shape = one_bias.shape, dtype = one_bias.dtype, buffer = nl.hbm)
+    nl.store(out_tokens_hbm, out_tokens_T)
 
-    # nl.store( out_bias, one_bias)
+    return out_tokens_hbm
 
-    # return out_bias
-
-    
-    one_token = out_tokens_T[0, :, :] # (64, 4)
-    
-    out_token = nl.ndarray( shape = one_token.shape, dtype = one_token.dtype, buffer = nl.hbm)
-
-    nl.store( out_token, one_token)
-
-    return out_token
-    
 
 if __name__ == "__main__":
 
