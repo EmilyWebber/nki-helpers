@@ -2,13 +2,92 @@ import numpy as np
 from neuronxcc import nki
 import neuronxcc.nki.isa as nisa
 import neuronxcc.nki.language as nl
-from moe_fwd_transposed import (
-                    nki_rms_norm,
-                    nki_lang_softmax,
-                    generate_input_shapes
-)
 
 import os
+
+def nki_rms_norm(x, scale, eps=1e-05):
+    # Convert to float32 for better numerical stability
+    t = x.astype(np.float32)
+    
+    # Compute mean of squares along last dimension
+    mean_squared = nl.mean(nl.square(t), axis=-1, keepdims=True)
+    
+    # Compute rsqrt(mean + eps) directly
+    rsqrt = 1.0 / nl.sqrt(mean_squared + eps)
+    
+    # Normalize
+    t = t * rsqrt
+    
+    # Apply scale - broadcasting happens automatically
+    t = nl.multiply(t, scale)
+    
+    # Convert back to original dtype
+    return t.astype(x.dtype)
+
+def generate_input_shapes(tp=4, context_length = 128, hidden_size = 128, num_experts = 32):
+    '''
+    Generates all shapes used throughout the tutorial, but takes different parameters based on which version you want to test.
+
+    Both MLP1 and MLP2 weights are delivered transpose to the kernels
+    '''
+
+    intermediate_size_per_device = (hidden_size * 2) // tp # 64
+
+    experts_per_device = num_experts // tp 
+    
+    t = np.random.randn(context_length, hidden_size).astype(np.float16)
+    
+    scale = np.ones((1, hidden_size)).astype(np.float16)
+
+    gate_weight = np.random.randn(hidden_size, experts_per_device).astype(np.float16)
+
+    gate_bias = np.random.randn(1, experts_per_device).astype(np.float16)
+
+    mlp1_weight = np.random.randn(experts_per_device, intermediate_size_per_device, hidden_size).astype(np.float16)
+    
+    mlp1_bias_T = np.random.randn(intermediate_size_per_device, experts_per_device).astype(np.float16)
+
+    mlp2_weight = np.random.randn(experts_per_device, hidden_size,  hidden_size // tp).astype(np.float16)
+
+    mlp2_bias_T = np.random.randn(hidden_size, experts_per_device,).astype(np.float16)
+
+    return t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias_T, mlp2_weight, mlp2_bias_T
+
+
+def nki_isa_softmax(expert_values):
+    """
+    Compute softmax using NKI ISA operations
+    
+    Parameters:
+    -----------
+    expert_values : Tensor
+        Input tensor of shape [128, k] where k is typically 4
+        
+    Returns:
+    --------
+    expert_weights : Tensor
+        Softmax output of shape [128, k]
+    """
+    # 1. Find max values along expert dimension (k)
+    max_values = nisa.tensor_reduce(op=nl.max, data=expert_values, axis=1)  # Results in [128, 1]
+    
+    # 2. Subtract max for numerical stability
+    shifted_values = nisa.tensor_scalar(data=expert_values, op0=nl.subtract, operand0=max_values, engine=nisa.vector_engine)
+    
+    # 3. Compute exp
+    exp_values = nisa.activation(op=nl.exp, data=shifted_values, bias=None, scale=1.0)
+    
+    # 4. Sum across expert dimension
+    sum_exp = nisa.tensor_reduce(op=nl.add, data=exp_values, axis=1)  # Results in [128, 1]
+    
+    # 5. Compute reciprocal of sum
+    inverse_sum = nisa.reciprocal(data=sum_exp)
+    
+    # 6. Normalize (multiply by inverse sum)
+    expert_weights = nisa.tensor_scalar(data=exp_values, op0=nl.multiply, 
+                                        operand0=inverse_sum, engine=nisa.vector_engine, dtype=expert_values.dtype)
+    
+    return expert_weights
 
 def nki_isa_topk(g, k=4, TILE_P=128):
     """
@@ -271,7 +350,13 @@ def sample_selection_kernel(t, scale, gate_weight, gate_bias, mlp1_weight, mlp1_
 
     t = nki_swiglu_dma_transpose(rt_token_T) # (128, 32, 4)
 
-    out_tokens_T = mlp_two_projection(batch_size, k, intermediate_size, hidden_size, hidden_by_tp, mlp2_weight, expert_indices, mlp2_bias_T, t)
+    out_tokens_T = mlp_two_projection(batch_size, k, intermediate_size, hidden_size, hidden_by_tp, mlp2_weight, expert_indices, mlp2_bias_T, t) # (128, 128, 4)
+
+    expert_weights = nki_isa_softmax(expert_values)
+
+    print (expert_weights.shape)
+
+    
     
     # one_bias = selected_bias2_T[ 0, :, :]
 
