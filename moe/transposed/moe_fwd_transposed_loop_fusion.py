@@ -14,18 +14,37 @@ from moe_fwd_transposed import (
     load_mlp_bias
 )
 
+def fused_mlp1(b, k, intermediate_size, hidden_size, mlp1_weight, mlp1_bias_T, expert_indices, t, out_token):
 
+    # MLP1 - select one token, loop through e to select the weights, bias, do the matmul and sum to get one vector 
 
+    one_token = nl.ndarray( (1, hidden_size), dtype = t.dtype, buffer = nl.sbuf) # (1, 128)
 
+    nisa.dma_copy(dst = one_token, src = t[b:b+1, 0:hidden_size] )
 
+    out_token = nl.ndarray( shape = (intermediate_size, k), dtype = t.dtype, buffer = nl.sbuf)
+    
+    for e in nl.static_range(k):
+    
+        expert_index_view = nl.ndarray((1, 1), dtype = expert_indices.dtype, buffer = nl.sbuf)
+    
+        nisa.dma_copy(dst =  expert_index_view[0:1, 0:1], src = expert_indices[b, e])
 
+        one_weight = nl.ndarray( shape = (intermediate_size, hidden_size), dtype = mlp1_weight.dtype, buffer = nl.sbuf) 
+        
+        one_weight[...] = nl.load(mlp1_weight[expert_index_view[0, 0], :, :])  # (64, 128)
 
+        one_bias_T = nl.ndarray( shape = (intermediate_size, 1), dtype = mlp1_bias_T.dtype, buffer = nl.sbuf)
 
+        one_bias_T[...] = nl.load(mlp1_bias_T[:, expert_index_view[0,0]]) # (64, 1)
 
+        multiplied = nl.multiply(one_weight, one_token) + one_bias_T # (64, 128)
 
+        one_vector = nl.sum(multiplied, axis=-1) # (64, 1)
+            
+        out_token[:, e:e+1] = one_vector 
 
-
-
+    return out_token
 
 @nki.jit(debug_kernel=True)
 def moe_mlp_fwd_fused(x, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias_T, mlp2_weight, mlp2_bias_T):
@@ -67,49 +86,24 @@ def moe_mlp_fwd_fused(x, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias_T
     g = nl.add(g, gate_bias)
     
     expert_indices, expert_values = nki_isa_topk(g, k) # (128, 4)
-
-    # load mlp1 and mlp2 weights and biases 
-
-    selected_weights_1 = load_mlp_weights(batch_size, k, intermediate_size, hidden_size, mlp1_weight, expert_indices, mlp='1') # (128, 4, 64, 128)
-
-    selected_bias_T_1 = load_mlp_bias(batch_size, k, intermediate_size, hidden_size, mlp1_bias_T, expert_indices, mlp='1') #(128, 64, 4)
-
-    selected_weights_2 = load_mlp_weights(batch_size, k, intermediate_size, hidden_size, mlp2_weight, expert_indices, mlp='2')
-    
-    selected_bias_T_2 = load_mlp_bias(batch_size, k, intermediate_size, hidden_size, mlp2_bias_T, expert_indices, mlp='2')
-
     expert_weights = nki_isa_softmax(expert_values) # (128, 4)
+    expert_weights_T = nl.transpose(expert_weights) # (4, 128)
 
-    expert_weights_T = nl.transpose(expert_weights) # (, 128)
-
-    # do the expert weight and transpose here
-
-    # for b in nl.static_range(batch_size): 
-
-        # mlp1
-
-        # swiglu
-
-        # mlp2
-
-        # weighted sum 
-
-
-
-
-
+    for b in nl.static_range(batch_size): 
         
+        out_token = nl.ndarray( shape = (intermediate_size, k), dtype = t.dtype, buffer = nl.sbuf)
 
+        out_token[...] = fused_mlp1(b, k, intermediate_size, hidden_size, mlp1_weight, mlp1_bias_T, expert_indices, t, out_token)
+        
+        # swiglu - do this on a per token basis 
 
-    
-    out_t = nl.ndarray( shape = t.shape, dtype = t.dtype, buffer = nl.hbm)
-    nl.store(out_t, t)
-    return out_t
+        # mlp2 - loops through e, select one token, select the weights, bias, do the matmul
 
+        # weighted sum - select one token, one expert weight, take the wegighted sum 
 
-
-
-
+    out_token_hbm = nl.ndarray(shape = out_token.shape, dtype = out_token.dtype, buffer = nl.hbm)
+    nl.store(out_token_hbm, out_token)
+    return out_token_hbm
 
 
 
