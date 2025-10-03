@@ -14,6 +14,32 @@ from moe_fwd_transposed import (
     load_mlp_bias
 )
 
+def fused_mlp2(b, k, intermediate_size, hidden_size, hidden_by_tp, mlp2_weight, mlp2_bias_T, expert_indices, swiglu_t, out_token_2):
+
+    # mlp2 - loops through k, select one token, select the weights, bias, do the matmul
+             
+    for e in nl.static_range(k):
+
+        # this mlp has one token per expert
+        one_token = nl.ndarray( (hidden_by_tp, 1), dtype = swiglu_t.dtype, buffer = nl.sbuf) # (32, 1)
+        
+        one_token = nisa.tensor_copy(src = swiglu_t[ 0:hidden_by_tp, e] )
+
+        expert_index_view = nl.ndarray((1, 1), dtype = expert_indices.dtype, buffer = nl.sbuf)
+
+        # need to use DMA copy to extract (1,1) index from the tensor
+        nisa.dma_copy(dst =  expert_index_view[0:1, 0:1], src = expert_indices[b:b+1, e:e+1])
+
+        one_bias_T =  nl.load(mlp2_bias_T[:, expert_index_view[0,0]])  #(128, 1)
+
+        one_weight = nl.load(mlp2_weight[expert_index_view[0, 0], :, :]) # (128, 32)
+
+        multiplied = nl.matmul(one_weight, one_token) + one_bias_T # (128, 1)
+        
+        out_token_2[0:hidden_size, e ] = multiplied 
+
+    return out_token_2
+
 def fused_mlp1(b, k, intermediate_size, hidden_size, mlp1_weight, mlp1_bias_T, expert_indices, t, out_token):
 
     # MLP1 - select one token, loop through e to select the weights, bias, do the matmul and sum to get one vector 
@@ -167,16 +193,17 @@ def moe_mlp_fwd_fused(x, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias_T
 
         swiglu_t = nl.ndarray((swiglu_output_size, k), dtype=x.dtype, buffer=nl.sbuf)
         
-        # swiglu 
         swiglu_t[...] = swiglu(intermediate_size, out_token, swiglu_t, swiglu_output_size, alpha=1.702, limit=7.0)
 
-        # mlp2 - loops through e, select one token, select the weights, bias, do the matmul
+        out_token_2 = nl.ndarray( shape = (hidden_size, k), dtype = swiglu_t.dtype, buffer = nl.sbuf)
+
+        out_token_2[...] = fused_mlp2(b, k, intermediate_size, hidden_size, hidden_by_tp, mlp2_weight, mlp2_bias_T, expert_indices, swiglu_t, out_token_2)
 
         # weighted sum - select one token, one expert weight, take the wegighted sum 
 
-    out_swiglu = nl.ndarray(shape = swiglu_t.shape, dtype = swiglu_t.dtype, buffer = nl.hbm)
-    nl.store(out_swiglu, swiglu_t)
-    return out_swiglu
+    out_t = nl.ndarray(shape = out_token_2.shape, dtype = out_token_2.dtype, buffer = nl.hbm)
+    nl.store(out_t, out_token_2)
+    return out_t
 
 
 if __name__ == "__main__":
