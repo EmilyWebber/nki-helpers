@@ -141,6 +141,30 @@ def swiglu(intermediate_size, x, swiglu_t, output_size, alpha=1.702, limit=7.0):
     
     return swiglu_t
 
+def weighted_expert_sum_fused(expert_weights_T, out_token_2, weighted_t, k, b):
+    
+    # weighted sum - select one token, one expert weight, take the wegighted sum 
+
+    one_weight = nl.ndarray( (k, 1), dtype = expert_weights_T.dtype, buffer = nl.sbuf)
+
+    one_weight_T = nisa.tensor_copy(src = expert_weights_T[:, b:b+1])
+
+    one_token_T = nl.transpose(out_token_2) # (4, 128)
+
+    weighted = nisa.tensor_tensor(one_token_T, one_weight_T, nl.multiply) # now (4, 128)
+
+    weighted_T = nl.transpose(weighted) # back to (128, 4)
+
+    # to-do, switch to isa
+    summed =  nl.sum(weighted_T, axis=1)  # (128, 1)
+
+    print (summed.shape)
+
+    out_token_2[0:128, 0:1] = summed[0:128, 0:1]
+
+    return out_token_2
+    
+
 @nki.jit(debug_kernel=True)
 def moe_mlp_fwd_fused(x, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias_T, mlp2_weight, mlp2_bias_T):
     '''     
@@ -199,7 +223,10 @@ def moe_mlp_fwd_fused(x, scale, gate_weight, gate_bias, mlp1_weight, mlp1_bias_T
 
         out_token_2[...] = fused_mlp2(b, k, intermediate_size, hidden_size, hidden_by_tp, mlp2_weight, mlp2_bias_T, expert_indices, swiglu_t, out_token_2)
 
-        # weighted sum - select one token, one expert weight, take the wegighted sum 
+        # weighted_t = nl.ndarray((hidden_size, 1), dtype = t.dtype, buffer = nl.sbuf)
+
+        # weighted_t[...] = weighted_expert_sum_fused(expert_weights_T, out_token_2, weighted_t, k, b)
+
 
     out_t = nl.ndarray(shape = out_token_2.shape, dtype = out_token_2.dtype, buffer = nl.hbm)
     nl.store(out_t, out_token_2)
