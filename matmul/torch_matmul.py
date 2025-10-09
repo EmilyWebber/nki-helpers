@@ -1,6 +1,9 @@
 import torch
 from torch_xla.core import xla_model as xm
 
+from matrix_multiplication_nki_kernels import nki_matmul_fully_optimized_
+
+
 def cpu_test(lhs, rhs):
         
   output_torch_cpu = torch.matmul(lhs, rhs)
@@ -36,7 +39,23 @@ def test_medium_shapes():
   else:
     print("Neuron and CPU differ")
 
+def test_large_nki():
+    device = xm.xla_device()
+    
+    e = 2048 
+    s = 49152 
+    
+    a = torch.rand((e, s), dtype=torch.bfloat16, device=device)
+    
+    b = torch.rand((e, s), dtype=torch.bfloat16, device = device)
+                   
+    ab = nki_matmul_fully_optimized_(a, b) # gives (s, s)
+    
+    c = torch.rand((e, s), dtype=torch.bfloat16, device=device)
+
+    result = nki_matmul_fully_optimized_(c.T, ab) # gives (e, s)
+
 
 if __name__ == "__main__":
     
-    test_medium_shapes()
+  test_large_nki()
