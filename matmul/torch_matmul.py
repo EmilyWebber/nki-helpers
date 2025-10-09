@@ -17,9 +17,8 @@ def neuron_test(lhs, rhs):
 
   return output_torch_neuron
 
-
-if __name__ == "__main__":
-
+def test_medium_shapes():
+    
   lhs_shape = (4096, 1024)
   rhs_shape = (1024, 2048)
     
@@ -36,3 +35,8 @@ if __name__ == "__main__":
     print("Neuron and CPU match")
   else:
     print("Neuron and CPU differ")
+
+
+if __name__ == "__main__":
+    
+    test_medium_shapes()
