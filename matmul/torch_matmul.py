@@ -33,6 +33,6 @@ if __name__ == "__main__":
   output_torch_neuron = neuron_test(lhs, rhs)
     
   if torch.allclose(output_torch_cpu, output_torch_neuron, atol=1e-4, rtol=1e-2):
-    print("NKI and Torch match")
+    print("Neuron and CPU match")
   else:
-    print("NKI and Torch differ")
+    print("Neuron and CPU differ")
